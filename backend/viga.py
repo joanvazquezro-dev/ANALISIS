@@ -55,6 +55,21 @@ import sympy as sp
 # Importación condicional para evitar dependencia circular
 # generar_dataframe se importa dentro de calcular_reacciones cuando se necesita
 
+# Exportar clases públicas
+__all__ = [
+    'Carga',
+    'CargaPuntual',
+    'CargaMomento',
+    'CargaUniforme',
+    'CargaTriangular',
+    'CargaTrapezoidal',
+    'Apoyo',
+    'Viga',
+    'heaviside',
+    'heaviside_half',
+    'macaulay',
+]
+
 x = sp.symbols("x", real=True, nonnegative=True)
 
 
