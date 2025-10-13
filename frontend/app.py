@@ -1,3 +1,22 @@
+"""
+============================================================
+INTERFAZ WEB - ANALIZADOR DE VIGAS
+============================================================
+
+Esta es la aplicación principal con interfaz gráfica web.
+
+Para ejecutar:
+    streamlit run frontend/app.py
+
+Características:
+  • Configuración de vigas (L, E, I)
+  • Múltiples apoyos (isostáticos/hiperestáticos)
+  • Diversos tipos de carga
+  • Visualización de diagramas
+  • Exportación de resultados
+  • Múltiples sistemas de unidades
+============================================================
+"""
 import sys
 from pathlib import Path
 import streamlit as st
@@ -5,21 +24,23 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Helper compatibilidad para rerun (Streamlit >=1.27 usa st.rerun()
+# Compatibilidad con versiones de Streamlit
 if not hasattr(st, "experimental_rerun"):
     def _compat_rerun():
         st.rerun()
-    st.experimental_rerun = _compat_rerun  # type: ignore[attr-defined]
+    st.experimental_rerun = _compat_rerun
 
-# Helper para limpiar resultados evitando dejar la clave con valor None
+
 def reset_resultados():
+    """Limpia resultados almacenados para forzar recálculo."""
     st.session_state.pop("resultados", None)
 
-# Asegurar path al backend
+# Agregar backend al path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+# Importar clases del backend
 from backend.viga import (
     Viga,
     Apoyo,
@@ -27,13 +48,10 @@ from backend.viga import (
     CargaUniforme,
     CargaTriangular,
     CargaTrapezoidal,
-        CargaMomento,
+    CargaMomento,
 )
 from backend.calculos import generar_dataframe, obtener_maximos, discretizar
-from backend.utils import exportar_tabla, exportar_grafica, asegurar_directorios, convertir_dataframe_export
-# Añadimos import de nueva utilidad
-from backend.utils import exportar_configuracion
-
+from backend.utils import exportar_tabla, exportar_grafica, asegurar_directorios, convertir_dataframe_export, exportar_configuracion
 from backend.units import (
     LENGTH_UNITS,
     FORCE_UNITS,
@@ -44,6 +62,10 @@ from backend.units import (
     UNIT_SYSTEMS,
 )
 
+# ============================================================
+# CONFIGURACIÓN DE LA APLICACIÓN
+# ============================================================
+
 st.set_page_config(page_title="Analizador de Vigas", layout="wide")
 st.title("🧮 Analizador de Vigas - Curva Elástica")
 st.markdown(
@@ -51,68 +73,91 @@ st.markdown(
     "Agrega cargas, genera diagramas y verifica el principio de superposición."
 )
 
-# Detección simple del tema para ajustar colores (fallback a claro)
+# Detección de tema (claro/oscuro) para ajustar gráficas
 try:
-    _theme_base = st.get_option("theme.base")  # 'light' o 'dark'
+    _theme_base = st.get_option("theme.base")
 except Exception:
     _theme_base = "light"
 IS_DARK = (_theme_base == "dark")
 
-# Ajustes CSS con soporte a modo oscuro usando media queries
+# CSS personalizado para mejorar visualización
 CUSTOM_CSS = """
 <style>
-    .load-box { padding:0.4rem 0.6rem; background:#fafafa; border:1px solid #e3e3e3; border-radius:6px; }
-    .stMetric { background:#f5f7fa; border-radius:8px; padding:0.25rem 0.5rem; }
-    button[kind="primary"] { font-weight:600; }
-    /* Ajustes modo oscuro */
+    .load-box {
+        padding: 0.4rem 0.6rem;
+        background: #fafafa;
+        border: 1px solid #e3e3e3;
+        border-radius: 6px;
+    }
+    .stMetric {
+        background: #f5f7fa;
+        border-radius: 8px;
+        padding: 0.25rem 0.5rem;
+    }
+    button[kind="primary"] {
+        font-weight: 600;
+    }
+    
+    /* Modo oscuro */
     @media (prefers-color-scheme: dark) {
-        .load-box { background:#1e1f26; border:1px solid #3a3d46; color:#e6e6e6; }
-        .stMetric { background:#242730; color:#e6e6e6; }
-        /* Tablas: forzar contraste en celdas claras */
-        .stDataFrame tbody tr td { color:#e0e0e0; }
-        .stDataFrame thead tr th { color:#ffffff; }
+        .load-box {
+            background: #1e1f26;
+            border: 1px solid #3a3d46;
+            color: #e6e6e6;
+        }
+        .stMetric {
+            background: #242730;
+            color: #e6e6e6;
+        }
+        .stDataFrame tbody tr td {
+            color: #e0e0e0;
+        }
+        .stDataFrame thead tr th {
+            color: #ffffff;
+        }
     }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# Estilo Matplotlib acorde al modo
+# Estilo de gráficas según tema
 if IS_DARK:
     plt.style.use('dark_background')
-    # Ajuste de colores de rejilla más sutil
     plt.rcParams['grid.color'] = '#444444'
 else:
-    # Asegurar estilo por defecto (por si el usuario cambió estilos previamente)
     plt.rcParams.update(plt.rcParamsDefault)
 
-# ----------------- Helpers de conversión -----------------
-# Internamente todo en SI. Las funciones to_si_* multiplican por factor.
+# ============================================================
+# FUNCIONES DE CONVERSIÓN DE UNIDADES
+# ============================================================
+# Cálculos internos siempre en SI, estas funciones convierten entrada/salida
 
 def to_si_L(v, u): return v * LENGTH_UNITS[u]
-
 def to_si_F(v, u): return v * FORCE_UNITS[u]
-
 def to_si_w(v, u): return v * DIST_LOAD_UNITS[u]
-
 def to_si_E(v, u): return v * E_UNITS[u]
-
 def to_si_I(v, u): return v * INERCIA_UNITS[u]
-
 def label_with_unit(base, unit): return f"{base} ({unit})"
 
-# ----------------- Estado inicial -----------------
+# ============================================================
+# INICIALIZACIÓN DE ESTADO DE LA APLICACIÓN
+# ============================================================
+
+# Valores predeterminados (SI)
 _defaults_si = {
-    "L_si": 6.0,
-    "E_si": 210e9,
-    "I_si": 8e-6,
-    "P_si": 1000.0,
-    "a_si": 2.0,
-    "w_si": 2000.0,
+    "L_si": 6.0,       # Longitud: 6 metros
+    "E_si": 210e9,     # Módulo: 210 GPa (acero estructural)
+    "I_si": 8e-6,      # Inercia: 8 cm^4
+    "P_si": 1000.0,    # Carga puntual: 1 kN
+    "a_si": 2.0,       # Posición: 2 m
+    "w_si": 2000.0,    # Carga distribuida: 2 kN/m
     "w1_si": 3000.0,
     "w2_si": 1000.0,
     "inicio_si": 0.0,
     "fin_si": 3.0,
 }
+
+# Inicializar estado si no existe
 for k, v in _defaults_si.items():
     st.session_state.setdefault(k, v)
 st.session_state.setdefault("unit_system", "SI (N, m)")
@@ -729,9 +774,9 @@ with tabs[1]:
             # Agregar apoyos en diagrama de cortante
             plot_apoyos_en_diagrama(axv, data.get('apoyos', []), disp_len, y_pos=0)
             
-            axm.plot(df["x"] / LENGTH_UNITS[disp_len], df["momento"] / (FORCE_UNITS[disp_force]*LENGTH_UNITS[disp_len]), 
+            axm.plot(df["x"] / LENGTH_UNITS[disp_len], -df["momento"] / (FORCE_UNITS[disp_force]*LENGTH_UNITS[disp_len]), 
                     color="#2ca02c", linewidth=2)
-            axm.set_ylabel(f"M [{disp_force}·{disp_len}]", fontsize=11)
+            axm.set_ylabel(f"M [{disp_force}·{disp_len}] (dibujado en lado comprimido)", fontsize=11)
             axm.set_xlabel(f"x [{disp_len}]", fontsize=11)
             axm.grid(alpha=0.3, linestyle='--')
             axm.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)

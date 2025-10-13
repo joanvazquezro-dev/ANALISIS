@@ -1,4 +1,21 @@
-"""Interfaces interactivas para el módulo de vigas."""
+"""
+============================================================
+INTERFACES INTERACTIVAS (CLI y Jupyter)
+============================================================
+
+¿Qué hace este archivo?
+- Provee menús de consola para usar el analizador sin GUI
+- Interfaz con botones para Jupyter Notebooks
+- Útil para pruebas rápidas o uso en terminal
+
+NOTA: Para uso normal, se recomienda la interfaz web (app.py)
+      Este archivo es opcional y para usuarios avanzados.
+
+Funciones principales:
+  - iniciar_menu_cli(): Menú interactivo en terminal
+  - iniciar_menu_jupyter(): Interfaz con widgets en Jupyter
+============================================================
+"""
 from __future__ import annotations
 
 import textwrap

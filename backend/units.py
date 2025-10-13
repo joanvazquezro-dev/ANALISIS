@@ -1,58 +1,123 @@
-"""Definiciones centralizadas de sistemas y factores de unidades.
-
-Todos los cálculos internos del backend se realizan en SI:
-- Longitud: m
-- Fuerza: N
-- Módulo: Pa
-- Momento de inercia: m^4
-
-Este módulo provee los diccionarios de factores para convertir valores
-introducidos por el usuario a SI (multiplicar por el factor) y para
-presentar resultados en otras unidades (dividir por el factor).
 """
-from __future__ import annotations
+============================================================
+CONVERSIÓN DE UNIDADES
+============================================================
 
+¿Qué hace este archivo?
+- Define factores de conversión entre diferentes sistemas de unidades
+- Todo el cálculo interno usa SI (Sistema Internacional)
+- La interfaz puede mostrar resultados en otras unidades
+
+Unidades SI utilizadas:
+  - Longitud → metros (m)
+  - Fuerza → Newtons (N)
+  - Presión → Pascales (Pa)
+  - Inercia → metros⁴ (m⁴)
+============================================================
+"""
 from functools import lru_cache
 from typing import Dict
 
-# Factores a SI (multiplicar valor en unidad elegida * factor -> SI)
-LENGTH_UNITS: Dict[str, float] = {"m": 1.0, "ft": 0.3048}
-FORCE_UNITS: Dict[str, float] = {"N": 1.0, "kN": 1e3, "lb": 4.4482216153, "kgf": 9.81}
+# ============================================================
+# FACTORES DE CONVERSIÓN A SI
+# ============================================================
+# Para convertir a SI: valor_usuario × factor = valor_SI
+# Para mostrar desde SI: valor_SI ÷ factor = valor_mostrado
+
+LENGTH_UNITS: Dict[str, float] = {
+    "m": 1.0,        # Metro (base SI)
+    "ft": 0.3048     # Pie = 0.3048 metros
+}
+
+FORCE_UNITS: Dict[str, float] = {
+    "N": 1.0,                    # Newton (base SI)
+    "kN": 1e3,                   # Kilonewton = 1000 N
+    "lb": 4.4482216153,          # Libra-fuerza
+    "kgf": 9.81                  # Kilogramo-fuerza (masa × g)
+}
+
 DIST_LOAD_UNITS: Dict[str, float] = {
     "N/m": 1.0,
     "kN/m": 1e3,
     "lb/ft": FORCE_UNITS["lb"] / LENGTH_UNITS["ft"],
-    "kg/m": 9.81,  # masa lineal * g -> N/m
+    "kg/m": 9.81,  # Masa lineal × gravedad = Fuerza/longitud
 }
-E_UNITS: Dict[str, float] = {"Pa": 1.0, "GPa": 1e9, "MPa": 1e6}
-INERCIA_UNITS: Dict[str, float] = {"m^4": 1.0, "cm^4": (1e-2) ** 4}
-DEFLEXION_DISPLAY: Dict[str, float] = {"m": 1.0, "mm": 1e-3}
 
-# Sistemas de unidades predefinidos (para UI). Se mantienen E e I métricos en imperial para simplificar.
+E_UNITS: Dict[str, float] = {
+    "Pa": 1.0,       # Pascal (base SI)
+    "GPa": 1e9,      # Gigapascal
+    "MPa": 1e6       # Megapascal
+}
+
+INERCIA_UNITS: Dict[str, float] = {
+    "m^4": 1.0,             # Metro^4 (base SI)
+    "cm^4": (1e-2) ** 4     # Centímetro^4
+}
+
+DEFLEXION_DISPLAY: Dict[str, float] = {
+    "m": 1.0,        # Metro
+    "mm": 1e-3       # Milímetro
+}
+
+# ============================================================
+# SISTEMAS PREDEFINIDOS (para selección en interfaz)
+# ============================================================
 UNIT_SYSTEMS = {
-    "SI (N, m)": {"len": "m", "force": "N", "w": "N/m", "E": "Pa", "I": "m^4", "defl": "m"},
-    "SI mixto (kN, m)": {"len": "m", "force": "kN", "w": "kN/m", "E": "GPa", "I": "m^4", "defl": "mm"},
-    "Entrada masa (kg/m)": {"len": "m", "force": "N", "w": "kg/m", "E": "Pa", "I": "m^4", "defl": "mm"},
-    "Imperial simplificado (lb, ft)": {"len": "ft", "force": "lb", "w": "lb/ft", "E": "GPa", "I": "m^4", "defl": "mm"},
+    "SI (N, m)": {
+        "len": "m", 
+        "force": "N", 
+        "w": "N/m", 
+        "E": "Pa", 
+        "I": "m^4", 
+        "defl": "m"
+    },
+    "SI mixto (kN, m)": {
+        "len": "m", 
+        "force": "kN", 
+        "w": "kN/m", 
+        "E": "GPa", 
+        "I": "m^4", 
+        "defl": "mm"
+    },
+    "Entrada masa (kg/m)": {
+        "len": "m", 
+        "force": "N", 
+        "w": "kg/m",  # La app convierte automáticamente kg/m → N/m
+        "E": "Pa", 
+        "I": "m^4", 
+        "defl": "mm"
+    },
+    "Imperial simplificado (lb, ft)": {
+        "len": "ft", 
+        "force": "lb", 
+        "w": "lb/ft", 
+        "E": "GPa",  # Módulo E se mantiene en GPa por conveniencia
+        "I": "m^4",  # Inercia se mantiene en m^4
+        "defl": "mm"
+    },
 }
 
+# ============================================================
+# FUNCIÓN DE CONVERSIÓN CON CACHÉ
+# ============================================================
 
 @lru_cache(maxsize=128)
 def factor(units_map_key: str, key: str) -> float:
-    """Devuelve el factor de conversión a SI para una clave, con validación simple.
+    """
+    Obtiene el factor de conversión a SI para una unidad específica.
     
-    Usa caché LRU para optimizar conversiones repetidas.
+    Ejemplo de uso:
+        factor('LENGTH', 'm') → 1.0
+        factor('LENGTH', 'ft') → 0.3048
+        factor('FORCE', 'kN') → 1000.0
     
-    Parameters
-    ----------
-    units_map_key : str
-        Tipo de unidad: 'LENGTH', 'FORCE', 'DIST_LOAD', 'E', 'INERCIA', 'DEFLEXION'
-    key : str
-        Unidad específica (ej: 'm', 'kN', 'GPa')
+    El decorador @lru_cache guarda resultados previos para mayor velocidad.
     
-    Returns
-    -------
-    float
+    Parámetros:
+        units_map_key: Tipo de magnitud ('LENGTH', 'FORCE', 'E', etc.)
+        key: Unidad específica ('m', 'kN', 'GPa', etc.)
+    
+    Retorna:
         Factor de conversión a SI
     """
     units_maps = {

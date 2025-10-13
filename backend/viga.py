@@ -1,47 +1,65 @@
-"""Modelado de vigas simplemente apoyadas (análisis elástico lineal).
+"""
+============================================================
+MODELADO DE VIGAS - ANÁLISIS ESTRUCTURAL
+============================================================
 
-Resumen
-=======
-Este módulo implementa:
+Este archivo contiene el núcleo matemático del analizador de vigas.
 
-1. Jerarquía de cargas (puntual, uniforme, triangular, trapezoidal).
-2. Clase central :class:`Viga` que:
-     - Calcula reacciones en apoyos por equilibrio estático.
-     - Construye expresiones simbólicas de cortante V(x), momento M(x),
-         pendiente θ(x) y deflexión y(x) usando SymPy.
-     - Proporciona un *fallback* numérico robusto basado en integración
-         trapezoidal acumulada cuando la integración simbólica falla
-         (expresiones excesivamente complejas o combinaciones degeneradas).
+CLASES PRINCIPALES:
+-------------------
+  Carga → Clase base para todos los tipos de carga
+      ├── CargaPuntual → Fuerza concentrada (P en x=a)
+      ├── CargaMomento → Par aplicado (M₀ en x=a)
+      ├── CargaUniforme → w constante en [a,b]
+      ├── CargaTriangular → w variable linealmente (caso especial trapezoidal)
+      └── CargaTrapezoidal → w₁ → w₂ en [a,b]
+  
+  Apoyo → Representa un punto de soporte de la viga
+  
+  Viga → Modelo completo que calcula:
+      • Reacciones en apoyos (equilibrio estático)
+      • Cortante V(x)
+      • Momento M(x)
+      • Pendiente θ(x)
+      • Deflexión y(x)
 
-Convenciones de Signo
+CONVENCIONES DE SIGNO:
 ---------------------
-* Fuerzas hacia abajo se ingresan con magnitud positiva (las reacciones
-    resultan positivas hacia arriba si el equilibrio lo requiere).
-* V(x) positivo: respuesta neta *hacia arriba* a la izquierda de la sección.
-    (Esto implica que una carga puntual descendente introduce un salto negativo
-    en V.)
-* M(x) positivo con la convención estándar (fibras superiores en compresión).
+  • Cargas hacia ABAJO → magnitud POSITIVA
+  • V(x) positivo → cortante hacia ARRIBA a la izquierda
+  • M(x) positivo → fibras superiores en COMPRESIÓN
+  • Momento concentrado POSITIVO → sentido ANTIHORARIO ↺
+  • Momento concentrado NEGATIVO → sentido HORARIO ↻
 
-Hipótesis
----------
-* Flexión esbelta (teoría de Euler-Bernoulli): se desprecia cortante en
-    la deflexión (no se usa teoría de Timoshenko).
-* Material lineal elástico: E constante.
-* Momento de inercia constante a lo largo de la viga.
-* Apoyos simples: y(0)=0, y(L)=0.
+MÉTODO DE CÁLCULO:
+------------------
+1. Reacciones:
+   - Isostático (2 apoyos): ΣFy=0, ΣMA=0
+   - Hiperestático (3+ apoyos): Método de flexibilidad
 
-Notas de Implementación
------------------------
-* Se emplean funciones de Heaviside y notación de Macaulay para ensamblar
-    piezas a trozos sin necesidad de condicionales complicados.
-* Las integraciones simbólicas pueden lanzar excepciones; se prueban rutas
-    alternativas antes de escalar el error.
-* Cachés (_reacciones, _expresiones, _lambdas) se invalidan al agregar o
-    limpiar cargas, evitando recomputación redundante.
-* El fallback numérico garantiza siempre un resultado utilizable para la UI.
+2. Cortante V(x):
+   Se construye usando funciones de Heaviside/Macaulay
+   V(x) = RA + Σ(efectos de cargas)
 
-Esta documentación está pensada para que un estudiante pueda explicar al
-profesor el flujo de cálculo sin entrar a detalles de SymPy.
+3. Momento M(x):
+   M(x) = ∫ V(ξ)dξ + Σ(saltos por momentos)
+
+4. Deflexión y(x):
+   EI·y'' = M(x)
+   θ(x) = ∫ M/(EI) dx
+   y(x) = ∫ θ dx
+   Con condiciones: y(apoyo_i) = 0
+
+Si la integración simbólica falla, usa método numérico
+(integración trapezoidal) como respaldo.
+
+HIPÓTESIS DEL MODELO:
+--------------------
+  • Teoría de Euler-Bernoulli (vigas esbeltas)
+  • Material lineal elástico (E constante)
+  • Momento de inercia constante (I)
+  • Pequeñas deformaciones
+============================================================
 """
 from __future__ import annotations
 
@@ -53,11 +71,10 @@ import numpy as np
 import pandas as pd
 import sympy as sp
 
-# Importación condicional para evitar dependencia circular
 if TYPE_CHECKING:
     from backend.calculos import generar_dataframe
 
-# Exportar clases públicas
+# Clases exportadas (disponibles cuando se importa este módulo)
 __all__ = [
     'Carga',
     'CargaPuntual',
@@ -72,30 +89,56 @@ __all__ = [
     'macaulay',
 ]
 
+# Variable simbólica para posición a lo largo de la viga
 x = sp.symbols("x", real=True, nonnegative=True)
 
 
+# ============================================================
+# FUNCIONES MATEMÁTICAS (Heaviside y Macaulay)
+# ============================================================
+# Estas funciones permiten construir expresiones matemáticas
+# que cambian en puntos específicos, muy útil para vigas
+
 def heaviside(val: sp.Expr) -> sp.Heaviside:
-    """Conveniencia para usar Heaviside con valor en cero igual a 0."""
+    """
+    Función escalón de Heaviside: H(x-a)
+    
+    Retorna 0 si x < a, y 1 si x ≥ a
+    Usado para "activar" efectos después de cierta posición
+    
+    Ejemplo: Una carga que empieza en x=2
+             H(x-2) = 0 para x<2, H(x-2) = 1 para x≥2
+    """
     return sp.Heaviside(val, 0)
 
 
 def heaviside_half(val: sp.Expr) -> sp.Heaviside:
-    """Heaviside con valor en el origen igual a 1/2.
-
-    Se usa para representar saltos en M(x) por momentos concentrados
-    cuando impacta evaluar exactamente en el punto de aplicación (x=a).
+    """
+    Función Heaviside con valor 1/2 en x=a
+    
+    Usada para momentos concentrados donde se evalúa
+    exactamente en el punto de aplicación.
     """
     return sp.Heaviside(val, sp.Rational(1, 2))
 
 
 def macaulay(variable: sp.Symbol, offset: float, exponent: int) -> sp.Expr:
-    """Devuelve la expresión de Macaulay <x - a>^n."""
+    """
+    Notación de Macaulay: <x - a>^n
+    
+    Representa (x - a)^n solo cuando x > a, y 0 cuando x ≤ a
+    
+    Muy útil para cargas distribuidas que empiezan en x=a
+    
+    Ejemplo:
+        macaulay(x, 2, 1) = 0 si x<2, (x-2) si x≥2
+        macaulay(x, 2, 2) = 0 si x<2, (x-2)² si x≥2
+    """
     return sp.Pow(variable - offset, exponent) * heaviside(variable - offset)
 
 
 def _import_generar_dataframe():
-    """Importa generar_dataframe de forma lazy para evitar dependencia circular."""
+    """Importa función generar_dataframe cuando se necesita (evita problemas circulares)."""
     try:
         from backend.calculos import generar_dataframe
         return generar_dataframe
@@ -106,51 +149,75 @@ def _import_generar_dataframe():
         )
 
 
+# ============================================================
+# CLASE BASE: CARGA
+# ============================================================
+
 @dataclass
 class Carga:
-    """Clase base abstracta para cualquier tipo de carga.
-
-    Cada subclase debe implementar:
-    - :meth:`total_load`  (magnitud total equivalente en Newtons).
-    - :meth:`moment_about` (momento respecto a un origen dado).
-    - :meth:`shear_expression` (contribución simbólica a V(x)).
-    - Opcionalmente :meth:`load_intensity` si es carga distribuida.
+    """
+    Clase base para todos los tipos de carga.
+    
+    Cada tipo específico de carga (puntual, uniforme, etc.)
+    hereda de esta clase e implementa:
+      - total_load(): Fuerza total equivalente
+      - moment_about(): Momento respecto a un punto
+      - shear_expression(): Contribución al cortante V(x)
+      - load_intensity(): Intensidad q(x) para cargas distribuidas
     """
 
     def total_load(self) -> float:
+        """Retorna la carga total en Newtons."""
         raise NotImplementedError
 
     def moment_about(self, origen: float = 0.0) -> float:
+        """Retorna el momento de la carga respecto a un punto dado."""
         raise NotImplementedError
 
     def shear_expression(self, variable: sp.Symbol = x) -> sp.Expr:
-        """Contribución al esfuerzo cortante."""
+        """Retorna la expresión matemática de cómo afecta al cortante V(x)."""
         raise NotImplementedError
 
     def load_intensity(self, variable: sp.Symbol = x) -> sp.Expr:
-        """Intensidad de carga distribuida.
-
-        Para cargas concentradas devolver 0.
         """
-
+        Retorna la intensidad de carga q(x).
+        Para cargas puntuales retorna 0 (no tienen distribución continua).
+        """
         return sp.Integer(0)
 
     def descripcion(self) -> str:
+        """Texto descriptivo de la carga para mostrar al usuario."""
         return self.__class__.__name__
 
 
+# ============================================================
+# CARGA PUNTUAL: Fuerza concentrada en un punto
+# ============================================================
+
 @dataclass
 class CargaPuntual(Carga):
-    magnitud: float
-    posicion: float
-    units: str | None = None  # opcional: 'kgf' o 'kg'
+    """
+    Carga puntual: Fuerza P aplicada en posición x=a
+    
+    Ejemplo: Una persona de 70 kg parada en x=2.5m
+             P = 70 × 9.81 = 686.7 N en posición 2.5 m
+    
+    Efectos:
+      • Introduce salto en V(x) de magnitud P
+      • Cambia pendiente de M(x)
+    """
+    magnitud: float      # Fuerza en Newtons (positivo = hacia abajo)
+    posicion: float      # Posición en metros
+    units: str | None = None  # Opcional: conversión automática desde 'kgf' o 'kg'
 
     def __post_init__(self) -> None:
-        # Conversión de unidades opcional (mantener SI internamente)
+        # Conversión automática de masa a fuerza (kg → N)
         if self.units:
             u = self.units.lower()
-            if u in {"kgf", "kg"}:  # tratar masa como kgf * g
-                self.magnitud *= 9.81
+            if u in {"kgf", "kg"}:
+                self.magnitud *= 9.81  # Convertir a Newtons
+        
+        # Validaciones
         if self.posicion < 0:
             raise ValueError("La posición debe ser no negativa")
         if abs(self.magnitud) < 1e-12:
@@ -160,27 +227,49 @@ class CargaPuntual(Carga):
         return float(self.magnitud)
 
     def moment_about(self, origen: float = 0.0) -> float:
+        """Momento = Fuerza × distancia al origen"""
         distancia = self.posicion - origen
         return float(self.magnitud * distancia)
 
     def shear_expression(self, variable: sp.Symbol = x) -> sp.Expr:
+        """
+        La carga introduce salto negativo en V(x).
+        Usa Heaviside para activar después de x=posicion
+        """
         return -self.magnitud * heaviside(variable - self.posicion)
 
     def descripcion(self) -> str:
         return f"Carga puntual P={self.magnitud:.3g} N en x={self.posicion:.3g} m"
 
 
+# ============================================================
+# MOMENTO PUNTUAL: Par concentrado
+# ============================================================
+
 @dataclass
 class CargaMomento(Carga):
-    """Momento concentrado (par) aplicado en una posición x=a.
-
-    Convención: magnitud positiva produce un salto positivo en M(x).
-    No introduce fuerza vertical neta, por lo que V(x) no cambia.
     """
-
-    magnitud: float  # N·m
-    posicion: float  # m
-    en_vano: bool = True  # Si False y el momento está en un apoyo, no se aplica salto dentro del vano
+    Momento concentrado (par) aplicado en x=a
+    
+    CONVENCIÓN DE SIGNO:
+      • Magnitud POSITIVA → Sentido ANTIHORARIO ↺ (levanta lado derecho)
+      • Magnitud NEGATIVA → Sentido HORARIO ↻ (baja lado derecho)
+    
+    Ejemplo:
+      M = +500 N·m en x=3m → Momento antihorario que levanta la viga a la derecha
+      M = -500 N·m en x=3m → Momento horario que baja la viga a la derecha
+    
+    Efectos estructurales:
+      • NO cambia V(x) (no hay fuerza vertical)
+      • Introduce salto POSITIVO en M(x) si M > 0
+      • Introduce salto NEGATIVO en M(x) si M < 0
+    
+    Nota: Si el momento está exactamente en un apoyo,
+    'en_vano' determina si afecta dentro del vano o solo las reacciones
+    """
+    magnitud: float      # Momento en N·m (positivo=↺, negativo=↻)
+    posicion: float      # Posición en metros
+    en_vano: bool = True  # Si False en apoyo, no produce salto en M(x)
 
     def __post_init__(self) -> None:
         if self.posicion < 0:
@@ -189,14 +278,23 @@ class CargaMomento(Carga):
             raise ValueError("La magnitud del momento debe ser significativa")
 
     def total_load(self) -> float:
+        """Un momento puro no tiene fuerza vertical neta."""
         return 0.0
 
     def moment_about(self, origen: float = 0.0) -> float:
-        # Un par es un vector libre: el momento respecto a cualquier origen es su magnitud.
+        """
+        Un par es un vector libre: su efecto es el mismo
+        sin importar el punto de referencia.
+        
+        Para equilibrio de momentos:
+          ΣM = 0 → El momento entra con su signo
+          Positivo contribuye antihorario
+          Negativo contribuye horario
+        """
         return float(self.magnitud)
 
     def shear_expression(self, variable: sp.Symbol = x) -> sp.Expr:
-        # Un momento concentrado no altera V(x) en el modelo clásico (no usamos distribuciones).
+        """Un momento concentrado no altera V(x)."""
         return sp.Integer(0)
 
     def descripcion(self) -> str:
@@ -857,8 +955,24 @@ class Viga:
                         print(f"[Viga] Error también en método alternativo de momento: {e2}")
                     raise RuntimeError(f"No se pudo calcular la expresión del momento: {e}")
 
-            # Aportar saltos en M(x) por momentos concentrados: M += M0 * H(x-a)
-            # Usamos H(0)=1/2 para una convención explícita en el punto.
+            # ============================================================
+            # SALTOS EN M(x) POR MOMENTOS CONCENTRADOS
+            # ============================================================
+            # Relación: M(x) = ∫V(x)dx + Σ[M₀·H(x-a)]
+            #
+            # CONVENCIÓN DE SIGNOS (según mecánica de materiales):
+            #   M₀ > 0 (antihorario ↺):
+            #     • A la IZQUIERDA de x=a: M(x) no cambia
+            #     • A la DERECHA de x=a: M(x) aumenta en +M₀
+            #     • Efecto: Salta hacia ARRIBA en diagrama
+            #
+            #   M₀ < 0 (horario ↻):
+            #     • A la IZQUIERDA de x=a: M(x) no cambia  
+            #     • A la DERECHA de x=a: M(x) disminuye en M₀
+            #     • Efecto: Salta hacia ABAJO en diagrama
+            #
+            # Usamos H(0)=1/2 para evaluar correctamente en x=a
+            # ============================================================
             if any(isinstance(c, CargaMomento) for c in self.cargas):
                 for c in self.cargas:
                     if isinstance(c, CargaMomento):
@@ -935,7 +1049,7 @@ class Viga:
     def obtener_expresiones(self) -> Dict[str, sp.Expr]:
         return self._construir_expresiones()
 
-    def evaluar(self, num_puntos: int = 200) -> Dict[str, List[float]]:
+    def evaluar(self, num_puntos: int = 400) -> Dict[str, List[float]]:
         """Evalúa las expresiones simbólicas (o recurre al fallback numérico).
 
         Devuelve un diccionario con listas (x, V, M, theta, deflexion).
@@ -944,6 +1058,7 @@ class Viga:
         ----------
         num_puntos : int
             Número de puntos de discretización uniforme en [0, L].
+            Por defecto 400 (suficiente precisión para momentos concentrados).
         """
         try:
             expresiones = self._construir_expresiones()
@@ -969,11 +1084,17 @@ class Viga:
             expr += carga.load_intensity(x)
         return sp.simplify(expr)
 
-    def _evaluar_numerico(self, num_puntos: int = 200) -> Dict[str, List[float]]:
+    def _evaluar_numerico(self, num_puntos: int = 400) -> Dict[str, List[float]]:
         """Fallback usando integración numérica vectorizada.
 
         Construye V(x) simbólica pero sólo la evalúa numéricamente para evitar
         bucles anidados costosos.
+        
+        Parameters
+        ----------
+        num_puntos : int
+            Número de puntos de discretización. Por defecto 400 para
+            precisión adecuada en discontinuidades (momentos concentrados).
         """
         if self.debug:
             print("[Viga] Usando fallback numérico vectorizado")
@@ -1008,9 +1129,23 @@ class Viga:
                 step = (x_vals >= apoyo.posicion).astype(float)
                 V_vals += reacciones[apoyo.nombre] * step
 
-        # Integraciones sucesivas
+        # Integraciones sucesivas: M(x) = ∫V(x)dx
         M_vals = cumulative_trapezoid(V_vals, x_vals, initial=0.0)
-        # Añadir saltos por momentos concentrados: M += M0 * H(x-a)
+        
+        # ============================================================
+        # AÑADIR SALTOS POR MOMENTOS CONCENTRADOS (método numérico)
+        # ============================================================
+        # Mismo principio que el método simbólico:
+        #   M(x) = M_base(x) + M₀·H(x-a)
+        #
+        # Para x < a: H(x-a) = 0 → sin cambio
+        # Para x = a: H(x-a) = 0.5 → mitad del salto
+        # Para x > a: H(x-a) = 1 → salto completo
+        #
+        # Resultado visual en diagrama:
+        #   M₀ > 0 → Salto hacia ARRIBA
+        #   M₀ < 0 → Salto hacia ABAJO
+        # ============================================================
         if any(isinstance(c, CargaMomento) for c in self.cargas):
             for c in self.cargas:
                 if isinstance(c, CargaMomento):
@@ -1019,10 +1154,24 @@ class Viga:
                     esta_en_apoyo = any(abs(a - apoyo.posicion) < 1e-12 for apoyo in self.apoyos)
                     if esta_en_apoyo and not c.en_vano:
                         continue
-                    step = (x_vals > a).astype(float)
-                    # Si existe un nodo exactamente en a, añadir 1/2 en ese punto para H(0)=1/2
-                    eq_mask = np.isclose(x_vals, a)
-                    step = step + 0.5 * eq_mask.astype(float)
+                    
+                    # Función escalón de Heaviside: H(x-a)
+                    # = 0 si x < a
+                    # = 0.5 si x = a (dentro de tolerancia)
+                    # = 1 si x > a
+                    step = np.zeros_like(x_vals, dtype=float)
+                    
+                    # Identificar regiones
+                    mask_antes = x_vals < (a - 1e-9)  # Antes del momento
+                    mask_exacto = np.abs(x_vals - a) <= 1e-9  # En el momento (tolerancia muy pequeña)
+                    mask_despues = x_vals > (a + 1e-9)  # Después del momento
+                    
+                    # Asignar valores de Heaviside
+                    step[mask_antes] = 0.0
+                    step[mask_exacto] = 0.5
+                    step[mask_despues] = 1.0
+                    
+                    # Aplicar salto con el signo del momento
                     M_vals = M_vals + float(c.magnitud) * step
         
         EI = self.E * self.I
