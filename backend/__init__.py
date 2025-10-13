@@ -1,6 +1,7 @@
 """Paquete backend para el analizador de vigas."""
 from .viga import (
     Viga,
+    Apoyo,
     Carga,
     CargaPuntual,
     CargaMomento,
@@ -12,6 +13,7 @@ from . import calculos, menus, utils
 
 __all__ = [
     "Viga",
+    "Apoyo",
     "Carga",
     "CargaPuntual",
     "CargaMomento",
