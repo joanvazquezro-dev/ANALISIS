@@ -654,18 +654,15 @@ class Viga:
                 print(f"[Viga] Deflexiones por cargas en redundantes: {deflexiones_cargas}")
             
             # Paso 3: Calcular coeficientes de flexibilidad
-            # f_ij = deflexión en apoyo i debido a REACCIÓN unitaria (hacia arriba) en apoyo j
-            # Para carga unitaria hacia abajo, la deflexión es negativa
-            # Para reacción unitaria hacia arriba, la deflexión es positiva
+            # f_ij = deflexión en apoyo i debido a carga unitaria en apoyo j
             matriz_flexibilidad = np.zeros((n_redundantes, n_redundantes))
             
             for j, apoyo_j in enumerate(apoyos_redundantes):
-                # Aplicar REACCIÓN unitaria en apoyo j (hacia arriba = carga -1.0 hacia abajo)
+                # Aplicar carga unitaria en apoyo j
                 viga_unitaria = Viga(self.longitud, self.E, self.I,
                                    apoyos=[apoyo_izq, apoyo_der],
                                    debug=False)
-                # Carga negativa = reacción hacia arriba
-                carga_unitaria = CargaPuntual(magnitud=-1.0, posicion=apoyo_j.posicion)
+                carga_unitaria = CargaPuntual(magnitud=1.0, posicion=apoyo_j.posicion)
                 viga_unitaria.agregar_carga(carga_unitaria)
                 
                 try:
@@ -683,32 +680,35 @@ class Viga:
             if self.debug:
                 print(f"[Viga] Matriz de flexibilidad:\n{matriz_flexibilidad}")
             
-            # Paso 4: Resolver sistema [f]·{R_redundantes} + {δ_cargas} = 0
-            # Las deflexiones totales deben ser cero en los apoyos
-            # δ_total = δ_cargas + f·R = 0
-            # Por lo tanto: R = -f^(-1)·δ_cargas
+            # Paso 4: Resolver sistema [f]·{R_redundantes} = -{δ_cargas}
+            # (negativo porque queremos que la suma dé cero)
             reacciones_redundantes = np.linalg.solve(matriz_flexibilidad, -deflexiones_cargas)
             
             if self.debug:
                 print(f"[Viga] Reacciones redundantes: {reacciones_redundantes}")
             
             # Paso 5: Calcular reacciones finales en apoyos primarios
-            # Las reacciones redundantes (hacia arriba) afectan a los apoyos extremos
-            # Superposición: aplicar las reacciones redundantes como cargas hacia abajo
+            # Superposición: reacciones totales = reacciones_primarias + efecto de redundantes
+            
+            # Las reacciones redundantes son positivas hacia arriba
+            # Necesitamos calcular su efecto en los apoyos extremos
+            # Creamos cargas hacia abajo (negativas) que representan estas reacciones
             viga_redundantes = Viga(self.longitud, self.E, self.I,
                                   apoyos=[apoyo_izq, apoyo_der],
                                   debug=False)
             for i, apoyo_red in enumerate(apoyos_redundantes):
-                # Reacción hacia arriba = carga equivalente negativa
-                carga_equivalente = CargaPuntual(magnitud=-reacciones_redundantes[i], 
+                # Convertir reacción (hacia arriba) en carga equivalente (hacia abajo)
+                # Magnitud positiva en CargaPuntual representa carga hacia abajo
+                carga_equivalente = CargaPuntual(magnitud=reacciones_redundantes[i], 
                                                posicion=apoyo_red.posicion)
                 viga_redundantes.agregar_carga(carga_equivalente)
             
             reacciones_por_redundantes = viga_redundantes.calcular_reacciones()
             
-            # Superposición final
-            R_izq_total = reacciones_primarias[apoyo_izq.nombre] + reacciones_por_redundantes[apoyo_izq.nombre]
-            R_der_total = reacciones_primarias[apoyo_der.nombre] + reacciones_por_redundantes[apoyo_der.nombre]
+            # Superposición final: 
+            # R_extremos_total = R_por_cargas_externas - R_por_reacciones_internas
+            R_izq_total = reacciones_primarias[apoyo_izq.nombre] - reacciones_por_redundantes[apoyo_izq.nombre]
+            R_der_total = reacciones_primarias[apoyo_der.nombre] - reacciones_por_redundantes[apoyo_der.nombre]
             
             # Construir diccionario de reacciones completo
             self._reacciones = {
@@ -716,7 +716,7 @@ class Viga:
                 apoyo_der.nombre: R_der_total
             }
             
-            # Las reacciones redundantes son positivas hacia arriba
+            # Las reacciones redundantes son positivas (hacia arriba)
             for i, apoyo_red in enumerate(apoyos_redundantes):
                 self._reacciones[apoyo_red.nombre] = float(reacciones_redundantes[i])
             
