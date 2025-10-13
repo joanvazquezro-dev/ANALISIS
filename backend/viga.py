@@ -713,15 +713,16 @@ class Viga:
                 print(f"[Viga] Deflexiones por cargas en redundantes: {deflexiones_cargas}")
             
             # Paso 3: Calcular coeficientes de flexibilidad
-            # f_ij = deflexión en apoyo i debido a carga unitaria en apoyo j
+            # f_ij = deflexión en apoyo i debido a reacción unitaria hacia arriba en apoyo j
             matriz_flexibilidad = np.zeros((n_redundantes, n_redundantes))
             
             for j, apoyo_j in enumerate(apoyos_redundantes):
-                # Aplicar carga unitaria en apoyo j
+                # Aplicar reacción unitaria hacia arriba en apoyo j
+                # (carga hacia abajo negativa equivale a reacción hacia arriba)
                 viga_unitaria = Viga(self.longitud, self.E, self.I,
                                    apoyos=[apoyo_izq, apoyo_der],
                                    debug=False)
-                carga_unitaria = CargaPuntual(magnitud=1.0, posicion=apoyo_j.posicion)
+                carga_unitaria = CargaPuntual(magnitud=-1.0, posicion=apoyo_j.posicion)
                 viga_unitaria.agregar_carga(carga_unitaria)
                 
                 try:
@@ -751,23 +752,24 @@ class Viga:
             
             # Las reacciones redundantes son positivas hacia arriba
             # Necesitamos calcular su efecto en los apoyos extremos
-            # Creamos cargas hacia abajo (negativas) que representan estas reacciones
+            # Creamos cargas hacia abajo que representan estas reacciones
             viga_redundantes = Viga(self.longitud, self.E, self.I,
                                   apoyos=[apoyo_izq, apoyo_der],
                                   debug=False)
             for i, apoyo_red in enumerate(apoyos_redundantes):
-                # Convertir reacción (hacia arriba) en carga equivalente (hacia abajo)
-                # Magnitud positiva en CargaPuntual representa carga hacia abajo
-                carga_equivalente = CargaPuntual(magnitud=reacciones_redundantes[i], 
+                # Convertir reacción (hacia arriba, positiva) en carga equivalente (hacia abajo, negativa)
+                # Magnitud negativa en CargaPuntual equivale a reacción hacia arriba
+                carga_equivalente = CargaPuntual(magnitud=-reacciones_redundantes[i], 
                                                posicion=apoyo_red.posicion)
                 viga_redundantes.agregar_carga(carga_equivalente)
             
             reacciones_por_redundantes = viga_redundantes.calcular_reacciones()
             
             # Superposición final: 
-            # R_extremos_total = R_por_cargas_externas - R_por_reacciones_internas
-            R_izq_total = reacciones_primarias[apoyo_izq.nombre] - reacciones_por_redundantes[apoyo_izq.nombre]
-            R_der_total = reacciones_primarias[apoyo_der.nombre] - reacciones_por_redundantes[apoyo_der.nombre]
+            # R_extremos_total = R_por_cargas_externas + R_por_reacciones_internas
+            # (sumamos porque ya aplicamos signo negativo en las cargas equivalentes)
+            R_izq_total = reacciones_primarias[apoyo_izq.nombre] + reacciones_por_redundantes[apoyo_izq.nombre]
+            R_der_total = reacciones_primarias[apoyo_der.nombre] + reacciones_por_redundantes[apoyo_der.nombre]
             
             # Construir diccionario de reacciones completo
             self._reacciones = {

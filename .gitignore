@@ -1,0 +1,63 @@
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv
+env/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# IDEs
+.idea/
+*.iml
+.ipynb_checkpoints
+
+# =============================================================================
+# VSCode (carpeta completa)
+# =============================================================================
+.vscode/
+
+# =============================================================================
+# Sistema Operativo
+# =============================================================================
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+._*
+
+# =============================================================================
+# Proyecto - Analizador de Vigas
+# =============================================================================
+# Outputs generados
+outputs/*.csv
+outputs/*.json
+outputs/graficas/*.png
+outputs/graficas/*.jpg
+outputs/graficas/*.svg
+
+# Preservar estructura
+!outputs/.gitkeep
+!outputs/graficas/.gitkeep
+
+# Streamlit
+.streamlit/
+
+# Logs y temporales
+*.log
+*.tmp
+*.bak
