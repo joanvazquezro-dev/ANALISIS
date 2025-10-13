@@ -1,0 +1,25 @@
+{
+  "tipo": "viga_simplemente_apoyada",
+  "propiedades_SI": {
+    "L_m": 4.0,
+    "E_Pa": 210000000000.0,
+    "I_m4": 8e-06
+  },
+  "cargas": [
+    {
+      "tipo": "CargaUniforme",
+      "intensidad_Nm": 2000.0,
+      "inicio_m": 0.0,
+      "fin_m": 4.0
+    },
+    {
+      "tipo": "CargaTriangular",
+      "intensidad_inicio_Nm": 0.0,
+      "intensidad_fin_Nm": 2000.0,
+      "inicio_m": 2.0,
+      "fin_m": 4.0
+    }
+  ],
+  "notas": "Valores en unidades base SI. Cargar este JSON es suficiente para reconstruir el caso.",
+  "version_schema": 1
+}
