@@ -12,6 +12,7 @@ presentar resultados en otras unidades (dividir por el factor).
 """
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Dict
 
 # Factores a SI (multiplicar valor en unidad elegida * factor -> SI)
@@ -36,8 +37,39 @@ UNIT_SYSTEMS = {
 }
 
 
-def factor(units_map: Dict[str, float], key: str) -> float:
-    """Devuelve el factor de conversión a SI para una clave, con validación simple."""
+@lru_cache(maxsize=128)
+def factor(units_map_key: str, key: str) -> float:
+    """Devuelve el factor de conversión a SI para una clave, con validación simple.
+    
+    Usa caché LRU para optimizar conversiones repetidas.
+    
+    Parameters
+    ----------
+    units_map_key : str
+        Tipo de unidad: 'LENGTH', 'FORCE', 'DIST_LOAD', 'E', 'INERCIA', 'DEFLEXION'
+    key : str
+        Unidad específica (ej: 'm', 'kN', 'GPa')
+    
+    Returns
+    -------
+    float
+        Factor de conversión a SI
+    """
+    units_maps = {
+        'LENGTH': LENGTH_UNITS,
+        'FORCE': FORCE_UNITS,
+        'DIST_LOAD': DIST_LOAD_UNITS,
+        'E': E_UNITS,
+        'INERCIA': INERCIA_UNITS,
+        'DEFLEXION': DEFLEXION_DISPLAY,
+    }
+    
+    if units_map_key not in units_maps:
+        raise KeyError(f"Tipo de unidad desconocido: {units_map_key}")
+    
+    units_map = units_maps[units_map_key]
+    
     if key not in units_map:
-        raise KeyError(f"Unidad desconocida: {key}")
+        raise KeyError(f"Unidad '{key}' desconocida en {units_map_key}")
+    
     return units_map[key]

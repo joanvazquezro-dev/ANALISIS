@@ -46,14 +46,16 @@ profesor el flujo de cálculo sin entrar a detalles de SymPy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import sympy as sp
 
 # Importación condicional para evitar dependencia circular
-# generar_dataframe se importa dentro de calcular_reacciones cuando se necesita
+if TYPE_CHECKING:
+    from backend.calculos import generar_dataframe
 
 # Exportar clases públicas
 __all__ = [
@@ -90,6 +92,18 @@ def heaviside_half(val: sp.Expr) -> sp.Heaviside:
 def macaulay(variable: sp.Symbol, offset: float, exponent: int) -> sp.Expr:
     """Devuelve la expresión de Macaulay <x - a>^n."""
     return sp.Pow(variable - offset, exponent) * heaviside(variable - offset)
+
+
+def _import_generar_dataframe():
+    """Importa generar_dataframe de forma lazy para evitar dependencia circular."""
+    try:
+        from backend.calculos import generar_dataframe
+        return generar_dataframe
+    except ImportError as e:
+        raise ImportError(
+            f"No se pudo importar generar_dataframe: {e}. "
+            "Asegúrate de que backend/calculos.py esté disponible."
+        )
 
 
 @dataclass
@@ -402,9 +416,43 @@ class Viga:
                     raise ValueError(
                         f"El apoyo '{apoyo.nombre}' en x={apoyo.posicion} está fuera de la viga (L={self.longitud})"
                     )
+            
+            # Validar duplicados en apoyos iniciales
+            for i, apoyo in enumerate(self.apoyos):
+                for otro in self.apoyos[i+1:]:
+                    if abs(apoyo.posicion - otro.posicion) < 1e-3:
+                        raise ValueError(
+                            f"Los apoyos '{apoyo.nombre}' y '{otro.nombre}' están muy cercanos "
+                            f"(distancia={abs(apoyo.posicion - otro.posicion)*1000:.3f} mm, mínimo=1.0 mm)"
+                        )
+            
             # Ordenar apoyos por posición
             self.apoyos.sort(key=lambda a: a.posicion)
-
+    
+    def _validar_apoyo_duplicado(self, nueva_posicion: float, nuevo_nombre: str = "") -> None:
+        """Verifica que no haya apoyos muy cercanos (< 1mm).
+        
+        Parameters
+        ----------
+        nueva_posicion : float
+            Posición del nuevo apoyo a validar.
+        nuevo_nombre : str, optional
+            Nombre del nuevo apoyo (para mensajes de error).
+        
+        Raises
+        ------
+        ValueError
+            Si ya existe un apoyo muy cercano a la posición dada.
+        """
+        for apoyo_existente in self.apoyos:
+            distancia_mm = abs(apoyo_existente.posicion - nueva_posicion) * 1000
+            if distancia_mm < 1.0:
+                nombre_info = f"'{nuevo_nombre}' " if nuevo_nombre else ""
+                raise ValueError(
+                    f"Ya existe el apoyo '{apoyo_existente.nombre}' muy cercano a la posición {nombre_info}"
+                    f"x={nueva_posicion:.6f} m (distancia={distancia_mm:.3f} mm, mínimo=1.0 mm)"
+                )
+    
     def agregar_apoyo(self, apoyo: Apoyo) -> None:
         """Agrega un apoyo verificando que esté dentro del dominio de la viga.
         
@@ -415,12 +463,8 @@ class Viga:
                 f"El apoyo '{apoyo.nombre}' en x={apoyo.posicion} está fuera de la viga (L={self.longitud})"
             )
         
-        # Verificar que no haya un apoyo muy cercano (menos de 1mm)
-        for a in self.apoyos:
-            if abs(a.posicion - apoyo.posicion) < 1e-3:
-                raise ValueError(
-                    f"Ya existe un apoyo '{a.nombre}' muy cercano a x={apoyo.posicion}"
-                )
+        # Verificar que no haya un apoyo muy cercano usando método unificado
+        self._validar_apoyo_duplicado(apoyo.posicion, apoyo.nombre)
         
         self.apoyos.append(apoyo)
         self.apoyos.sort(key=lambda a: a.posicion)
@@ -500,7 +544,7 @@ class Viga:
         n_ecuaciones = 2  # Equilibrio para viga en 2D
         return n_apoyos - n_ecuaciones
     
-    def validar_sistema(self) -> Dict[str, any]:
+    def validar_sistema(self) -> Dict[str, Any]:
         """Valida el sistema estructural y retorna información de diagnóstico.
         
         Returns
@@ -651,9 +695,9 @@ class Viga:
             
             # Paso 2: Calcular deflexiones en posiciones de apoyos redundantes (sistema primario con cargas)
             try:
-                from backend.calculos import generar_dataframe
+                generar_dataframe = _import_generar_dataframe()
                 df_primario = generar_dataframe(viga_primaria, num_puntos=1000)
-            except:
+            except (ImportError, Exception):
                 # Fallback: evaluar numéricamente
                 resultados_primarios = viga_primaria._evaluar_numerico(1000)
                 df_primario = pd.DataFrame(resultados_primarios)
@@ -681,9 +725,9 @@ class Viga:
                 viga_unitaria.agregar_carga(carga_unitaria)
                 
                 try:
-                    from backend.calculos import generar_dataframe
+                    generar_dataframe = _import_generar_dataframe()
                     df_unit = generar_dataframe(viga_unitaria, num_puntos=1000)
-                except:
+                except (ImportError, Exception):
                     resultados_unit = viga_unitaria._evaluar_numerico(1000)
                     df_unit = pd.DataFrame(resultados_unit)
                 

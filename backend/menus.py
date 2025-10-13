@@ -172,8 +172,8 @@ def _generar_graficas(viga: Viga, df: pd.DataFrame) -> Dict[str, plt.Figure]:
 def _resolver_viga(viga: Viga) -> None:
     reacciones = viga.calcular_reacciones()
     print("\n✅ Reacciones:")
-    print(f"  RA = {reacciones['RA']:.4f} N")
-    print(f"  RB = {reacciones['RB']:.4f} N")
+    for nombre_apoyo, valor in reacciones.items():
+        print(f"  R_{nombre_apoyo} = {valor:.4f} N")
 
     df = calculos.generar_dataframe(viga)
     maximos = calculos.obtener_maximos(df)
