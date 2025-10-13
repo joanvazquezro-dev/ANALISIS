@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Helper compatibilidad para rerun (Streamlit >=1.27 usa st.rerun())
+# Helper compatibilidad para rerun (Streamlit >=1.27 usa st.rerun()
 if not hasattr(st, "experimental_rerun"):
     def _compat_rerun():
         st.rerun()
