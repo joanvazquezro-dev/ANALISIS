@@ -52,9 +52,6 @@ import numpy as np
 import pandas as pd
 import sympy as sp
 
-# Importación condicional para evitar dependencia circular
-# generar_dataframe se importa dentro de calcular_reacciones cuando se necesita
-
 x = sp.symbols("x", real=True, nonnegative=True)
 
 
@@ -635,9 +632,10 @@ class Viga:
             reacciones_primarias = viga_primaria.calcular_reacciones()
             
             # Paso 2: Calcular deflexiones en posiciones de apoyos redundantes (sistema primario con cargas)
+            # Usar el método interno evaluar() para evitar importación circular
             try:
-                from backend.calculos import generar_dataframe
-                df_primario = generar_dataframe(viga_primaria, num_puntos=1000)
+                resultados_primarios = viga_primaria.evaluar(num_puntos=1000)
+                df_primario = pd.DataFrame(resultados_primarios)
             except:
                 # Fallback: evaluar numéricamente
                 resultados_primarios = viga_primaria._evaluar_numerico(1000)
@@ -665,9 +663,10 @@ class Viga:
                 carga_unitaria = CargaPuntual(magnitud=1.0, posicion=apoyo_j.posicion)
                 viga_unitaria.agregar_carga(carga_unitaria)
                 
+                # Usar el método interno evaluar() para evitar importación circular
                 try:
-                    from backend.calculos import generar_dataframe
-                    df_unit = generar_dataframe(viga_unitaria, num_puntos=1000)
+                    resultados_unit = viga_unitaria.evaluar(num_puntos=1000)
+                    df_unit = pd.DataFrame(resultados_unit)
                 except:
                     resultados_unit = viga_unitaria._evaluar_numerico(1000)
                     df_unit = pd.DataFrame(resultados_unit)
