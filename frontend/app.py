@@ -22,6 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.viga import (
     Viga,
+    Apoyo,
     CargaPuntual,
     CargaUniforme,
     CargaTriangular,
@@ -151,6 +152,138 @@ with st.sidebar:
     I = st.session_state.I_si
 
     st.markdown("---")
+    st.header("⚓ Configurar apoyos")
+    
+    # Inicializar apoyos si no existen
+    if "apoyos" not in st.session_state:
+        st.session_state.apoyos = [
+            Apoyo(posicion=0.0, nombre="A"),
+            Apoyo(posicion=L, nombre="B")
+        ]
+    
+    # Ajustar apoyo B si cambió la longitud
+    if st.session_state.apoyos and len(st.session_state.apoyos) >= 2:
+        ultimo_apoyo = st.session_state.apoyos[-1]
+        if abs(ultimo_apoyo.posicion - L) > 1e-6:
+            # Solo ajustar si el último apoyo estaba en el extremo anterior
+            if abs(ultimo_apoyo.posicion - st.session_state.get("L_anterior", L)) < 1e-6:
+                ultimo_apoyo.posicion = L
+    
+    st.session_state.L_anterior = L
+    
+    # Validar sistema actual
+    viga_temp = Viga(L, E, I, apoyos=list(st.session_state.apoyos))
+    validacion = viga_temp.validar_sistema()
+    
+    # Mostrar estado del sistema
+    if validacion['tipo'] == 'isostatico':
+        st.success(f"✓ Sistema isostático ({len(st.session_state.apoyos)} apoyos)")
+    elif validacion['tipo'] == 'hiperestatico':
+        st.info(f"ℹ️ Sistema hiperestático grado {validacion['grado']} ({len(st.session_state.apoyos)} apoyos)")
+    else:
+        st.error(f"❌ Sistema hipostático ({len(st.session_state.apoyos)} apoyos)")
+    
+    # Presets de configuración
+    with st.expander("🎯 Configuraciones predefinidas"):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("2 apoyos (extremos)", use_container_width=True):
+                st.session_state.apoyos = [
+                    Apoyo(posicion=0.0, nombre="A"),
+                    Apoyo(posicion=L, nombre="B")
+                ]
+                reset_resultados()
+                st.experimental_rerun()
+        with col2:
+            if st.button("3 apoyos (continua)", use_container_width=True):
+                st.session_state.apoyos = [
+                    Apoyo(posicion=0.0, nombre="A"),
+                    Apoyo(posicion=L/2, nombre="B"),
+                    Apoyo(posicion=L, nombre="C")
+                ]
+                reset_resultados()
+                st.experimental_rerun()
+        
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("4 apoyos (equidist.)", use_container_width=True):
+                st.session_state.apoyos = [
+                    Apoyo(posicion=0.0, nombre="A"),
+                    Apoyo(posicion=L/3, nombre="B"),
+                    Apoyo(posicion=2*L/3, nombre="C"),
+                    Apoyo(posicion=L, nombre="D")
+                ]
+                reset_resultados()
+                st.experimental_rerun()
+        with col4:
+            if st.button("🗑️ Limpiar todos", use_container_width=True, type="secondary"):
+                st.session_state.apoyos = []
+                reset_resultados()
+                st.experimental_rerun()
+    
+    # Tabla de apoyos actuales
+    st.markdown("**Apoyos configurados:**")
+    
+    if not st.session_state.apoyos:
+        st.warning("No hay apoyos configurados")
+    else:
+        # Crear tabla con pandas para mejor visualización
+        apoyos_data = []
+        for apoyo in st.session_state.apoyos:
+            apoyos_data.append({
+                "Apoyo": apoyo.nombre,
+                f"Posición ({u_len})": f"{apoyo.posicion / LENGTH_UNITS[u_len]:.4f}",
+                "Tipo": "Extremo" if apoyo.posicion in [0.0, L] else "Intermedio"
+            })
+        
+        df_apoyos = pd.DataFrame(apoyos_data)
+        st.dataframe(df_apoyos, use_container_width=True, hide_index=True)
+        
+        # Botones de acción individual
+        st.markdown("**Acciones:**")
+        cols_apoyo = st.columns(min(len(st.session_state.apoyos), 4))
+        for i, apoyo in enumerate(st.session_state.apoyos):
+            with cols_apoyo[i % 4]:
+                if st.button(f"❌ {apoyo.nombre}", key=f"del_apoyo_{i}", help=f"Eliminar apoyo {apoyo.nombre}", use_container_width=True):
+                    st.session_state.apoyos.pop(i)
+                    reset_resultados()
+                    st.experimental_rerun()
+    
+    # Agregar nuevo apoyo
+    with st.expander("➕ Agregar apoyo personalizado"):
+        nuevo_nombre = st.text_input("Nombre del apoyo", value="C", key="nuevo_apoyo_nombre")
+        nueva_pos_input = st.number_input(
+            label_with_unit("Posición", u_len),
+            min_value=0.0,
+            max_value=L_input,
+            value=L_input / 2,
+            step=0.1,
+            key="nueva_apoyo_pos"
+        )
+        
+        if st.button("➕ Agregar apoyo", help="Añadir el apoyo definido"):
+            try:
+                nueva_pos = nueva_pos_input * LENGTH_UNITS[u_len]
+                nuevo_apoyo = Apoyo(posicion=nueva_pos, nombre=nuevo_nombre)
+                
+                # Verificar que no haya uno muy cercano
+                puede_agregar = True
+                for a in st.session_state.apoyos:
+                    if abs(a.posicion - nueva_pos) < 1e-3:
+                        st.error(f"Ya existe un apoyo '{a.nombre}' muy cercano a esa posición")
+                        puede_agregar = False
+                        break
+                
+                if puede_agregar:
+                    st.session_state.apoyos.append(nuevo_apoyo)
+                    st.session_state.apoyos.sort(key=lambda a: a.posicion)
+                    reset_resultados()
+                    st.success(f"Apoyo '{nuevo_nombre}' agregado en x={nueva_pos / LENGTH_UNITS[u_len]:.3f} {u_len}")
+                    st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Error al agregar apoyo: {e}")
+
+    st.markdown("---")
     st.header("Agregar carga")
     tipo = st.selectbox(
         "Tipo de carga",
@@ -259,28 +392,90 @@ tabs = st.tabs(["🧱 Cargas", "📊 Resultados", "🧪 Verificación"])
 
 # Helper graficado q(x) reutilizable
 
-def plot_q(ax, cargas, L, E, I, u_len, u_w, u_force):
+def plot_q(ax, cargas, L, E, I, u_len, u_w, u_force, apoyos=None):
+    """Grafica la intensidad de carga q(x) con apoyos y cargas puntuales."""
     if not cargas:
         ax.text(0.5,0.5,"(Sin cargas)", ha='center', transform=ax.transAxes)
         return
-    v_tmp = Viga(L, E, I)
+    
+    # Crear apoyos por defecto si no se proporcionan
+    if apoyos is None:
+        apoyos = [Apoyo(posicion=0.0, nombre="A"), Apoyo(posicion=L, nombre="B")]
+    
+    v_tmp = Viga(L, E, I, apoyos=list(apoyos))
     for c in cargas:
         v_tmp.agregar_carga(c)
     try:
         expr_q = v_tmp.intensidad_total()
         xs_q, q_vals = discretizar(expr_q, v_tmp.longitud, 300)
-        ax.plot(xs_q / LENGTH_UNITS[u_len], q_vals / DIST_LOAD_UNITS[u_w], color="#1f77b4")
+        ax.plot(xs_q / LENGTH_UNITS[u_len], q_vals / DIST_LOAD_UNITS[u_w], color="#1f77b4", linewidth=2)
+        
+        # Marcar cargas puntuales con líneas verticales
         for c in v_tmp.cargas:
             if isinstance(c, CargaPuntual):
-                ax.vlines(c.posicion / LENGTH_UNITS[u_len], 0, -c.magnitud / FORCE_UNITS[u_force], colors="crimson")
+                xpos = c.posicion / LENGTH_UNITS[u_len]
+                mag = c.magnitud / FORCE_UNITS[u_force]
+                ax.annotate('', xy=(xpos, 0), xytext=(xpos, -0.15*abs(mag)),
+                           arrowprops=dict(arrowstyle='->', color='crimson', lw=2))
+                ax.text(xpos, -0.18*abs(mag), f'P={abs(mag):.1f}', 
+                       ha='center', va='top', fontsize=8, color='crimson')
             elif isinstance(c, CargaMomento):
                 xpos = c.posicion / LENGTH_UNITS[u_len]
-                ax.scatter([xpos], [0], color="purple", marker="o")
-    except Exception:
-        ax.text(0.5,0.5,"(Error q(x))", ha='center', transform=ax.transAxes)
-    ax.set_xlabel(f"x [{u_len}]")
-    ax.set_ylabel(f"q [{u_w}]")
-    ax.grid(alpha=0.3)
+                # Símbolo de momento como arco circular
+                ax.scatter([xpos], [0], color="purple", marker="o", s=80, zorder=5, edgecolors='white', linewidths=1)
+                ax.text(xpos, 0, f"  M", ha='left', va='center', fontsize=9, color='purple', weight='bold')
+        
+        # Dibujar apoyos como triángulos verdes con etiquetas
+        for apoyo in v_tmp.apoyos:
+            xapoyo = apoyo.posicion / LENGTH_UNITS[u_len]
+            ax.scatter([xapoyo], [0], color="green", marker="^", s=150, zorder=10, 
+                      edgecolors='darkgreen', linewidths=1.5)
+            ax.text(xapoyo, 0, f"\n{apoyo.nombre}", ha='center', va='top', 
+                   fontsize=9, color='green', weight='bold')
+        
+    except Exception as e:
+        ax.text(0.5,0.5,f"(Error q(x): {e})", ha='center', transform=ax.transAxes, fontsize=8)
+    
+    ax.set_xlabel(f"x [{u_len}]", fontsize=10)
+    ax.set_ylabel(f"q [{u_w}]", fontsize=10)
+    ax.grid(alpha=0.3, linestyle='--')
+    ax.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+    ax.set_xlim(-0.05*L/LENGTH_UNITS[u_len], 1.05*L/LENGTH_UNITS[u_len])
+
+
+def plot_apoyos_en_diagrama(ax, apoyos, u_len, y_pos=0):
+    """Dibuja apoyos en un diagrama existente."""
+    for apoyo in apoyos:
+        xapoyo = apoyo.posicion / LENGTH_UNITS[u_len]
+        ax.scatter([xapoyo], [y_pos], color="green", marker="^", s=100, zorder=10,
+                  edgecolors='darkgreen', linewidths=1.0, alpha=0.7)
+        ax.axvline(x=xapoyo, color='green', linestyle=':', linewidth=0.8, alpha=0.4)
+
+
+def plot_diagrama_con_reacciones(ax, cargas, L, E, I, u_len, u_w, u_force, apoyos=None, reacciones=None):
+    """Grafica q(x) y además muestra las reacciones calculadas con flechas hacia arriba."""
+    # Primero dibujar el diagrama de carga normal
+    plot_q(ax, cargas, L, E, I, u_len, u_w, u_force, apoyos)
+    
+    # Si hay reacciones calculadas, dibujarlas
+    if reacciones and apoyos:
+        ylim = ax.get_ylim()
+        y_range = ylim[1] - ylim[0]
+        
+        for apoyo in apoyos:
+            if apoyo.nombre in reacciones:
+                R = reacciones[apoyo.nombre]
+                xapoyo = apoyo.posicion / LENGTH_UNITS[u_len]
+                R_display = R / FORCE_UNITS[u_force]
+                
+                # Flecha de reacción (hacia arriba)
+                arrow_height = 0.15 * y_range
+                ax.annotate('', xy=(xapoyo, ylim[0]), xytext=(xapoyo, ylim[0] - arrow_height),
+                           arrowprops=dict(arrowstyle='->', color='blue', lw=2.5))
+                ax.text(xapoyo, ylim[0] - arrow_height * 1.3, 
+                       f'R={R_display:.1f}', 
+                       ha='center', va='top', fontsize=8, color='blue', weight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.7))
 
 with tabs[0]:
     st.subheader("Cargas actuales")
@@ -382,41 +577,76 @@ with tabs[0]:
                         st.error(f"Error al actualizar: {e}")
 
     st.markdown("### Vista previa diagrama de carga")
-    fig_prev, ax_prev = plt.subplots(figsize=(6,2.3))
-    plot_q(ax_prev, st.session_state.cargas, L, E, I, u_len, u_w, u_force)
+    fig_prev, ax_prev = plt.subplots(figsize=(8,3))
+    plot_q(ax_prev, st.session_state.cargas, L, E, I, u_len, u_w, u_force, st.session_state.get("apoyos"))
     st.pyplot(fig_prev)
 
     if do_calc:
         if not st.session_state.cargas:
             st.warning("Agrega al menos una carga.")
+        elif len(st.session_state.get("apoyos", [])) < 1:
+            st.warning("Agrega al menos un apoyo.")
         else:
             try:
-                viga = Viga(L, E, I, debug=debug_mode)
-                for c in st.session_state.cargas:
-                    viga.agregar_carga(c)
-                df = generar_dataframe(viga, num_puntos=num_puntos)
-                st.session_state.last_df_si = df
-                maximos = obtener_maximos(df)
-                reacciones = viga.calcular_reacciones()
-                st.session_state["resultados"] = {
-                    "df": df,
-                    "maximos": maximos,
-                    "reacciones": reacciones,
-                    "L": L,
-                    "E": E,
-                    "I": I,
-                    # Guardamos lista de cargas para exportación futura
-                    "cargas": list(st.session_state.cargas),
-                }
-                if exportar:
-                    asegurar_directorios()
-                    ruta_tabla = exportar_tabla(df, "resultados_viga")
-                    # Exportar configuración JSON automáticamente
-                    ruta_cfg = exportar_configuracion(L, E, I, st.session_state.cargas, nombre="config_viga")
-                    st.info(f"CSV guardado en {ruta_tabla}\nConfig JSON en {ruta_cfg}")
-                st.success("Cálculo completado. Revisa la pestaña Resultados.")
+                viga = Viga(L, E, I, apoyos=list(st.session_state.apoyos), debug=debug_mode)
+                
+                # Validar sistema antes de calcular
+                validacion = viga.validar_sistema()
+                
+                if not validacion['valido']:
+                    st.error("⚠️ **El sistema no es válido para análisis**")
+                    for msg in validacion['mensajes']:
+                        st.error(msg)
+                    for adv in validacion['advertencias']:
+                        st.warning(adv)
+                else:
+                    # Mostrar información del sistema
+                    with st.expander("📋 Información del sistema", expanded=True):
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Tipo", validacion['tipo'].capitalize())
+                        col2.metric("Grado", validacion['grado'])
+                        col3.metric("Apoyos", len(st.session_state.apoyos))
+                        
+                        for msg in validacion['mensajes']:
+                            st.info(msg)
+                        for adv in validacion['advertencias']:
+                            st.warning(adv)
+                    
+                    # Proceder con el cálculo
+                    for c in st.session_state.cargas:
+                        viga.agregar_carga(c)
+                    
+                    with st.spinner('Calculando reacciones y diagramas...'):
+                        df = generar_dataframe(viga, num_puntos=num_puntos)
+                        st.session_state.last_df_si = df
+                        maximos = obtener_maximos(df)
+                        reacciones = viga.calcular_reacciones()
+                        
+                        st.session_state["resultados"] = {
+                            "df": df,
+                            "maximos": maximos,
+                            "reacciones": reacciones,
+                            "L": L,
+                            "E": E,
+                            "I": I,
+                            "cargas": list(st.session_state.cargas),
+                            "apoyos": list(st.session_state.apoyos),
+                            "validacion": validacion,
+                        }
+                        
+                        if exportar:
+                            asegurar_directorios()
+                            ruta_tabla = exportar_tabla(df, "resultados_viga")
+                            ruta_cfg = exportar_configuracion(L, E, I, st.session_state.cargas, nombre="config_viga")
+                            st.info(f"CSV guardado en {ruta_tabla}\nConfig JSON en {ruta_cfg}")
+                        
+                        st.success("✓ Cálculo completado. Revisa la pestaña Resultados.")
+                        
             except Exception as e:
-                st.error(f"Error en cálculo: {e}")
+                st.error(f"❌ Error en cálculo: {e}")
+                if debug_mode:
+                    import traceback
+                    st.code(traceback.format_exc())
 
 with tabs[1]:
     st.subheader("Resultados del análisis")
@@ -427,17 +657,34 @@ with tabs[1]:
         df = data["df"]
         maximos = data["maximos"]
         reacciones = data["reacciones"]
+        validacion = data.get("validacion", {})
+        
+        # Mostrar información del sistema calculado
+        if validacion:
+            col_val1, col_val2, col_val3 = st.columns(3)
+            col_val1.metric("Sistema", validacion.get('tipo', 'N/A').capitalize())
+            col_val2.metric("Grado", validacion.get('grado', 0))
+            col_val3.metric("N° Apoyos", len(data.get('apoyos', [])))
+        
         # Siempre mostrar en las unidades de exportación seleccionadas
         disp_len, disp_force, disp_defl = exp_len, exp_force, exp_defl
         # DataFrame convertido para visualización (copia)
         df_disp = convertir_dataframe_export(df, disp_len, disp_force, disp_defl)
 
-        m1, m2, m3 = st.columns(3)
-        m1.metric("RA", f"{reacciones['RA']/FORCE_UNITS[disp_force]:.3f} {disp_force}")
-        m2.metric("RB", f"{reacciones['RB']/FORCE_UNITS[disp_force]:.3f} {disp_force}")
+        # Mostrar reacciones dinámicamente según número de apoyos
+        num_reacciones = len(reacciones)
+        cols_reacciones = st.columns(num_reacciones + 1)
+        
+        for i, (nombre_apoyo, valor_reaccion) in enumerate(reacciones.items()):
+            cols_reacciones[i].metric(
+                nombre_apoyo,
+                f"{valor_reaccion/FORCE_UNITS[disp_force]:.3f} {disp_force}"
+            )
+        
+        # Mostrar deflexión máxima en la última columna
         if "deflexion" in maximos:
             xdef, ydef = maximos["deflexion"]
-            m3.metric("|y|max", f"{ydef/DEFLEXION_DISPLAY[disp_defl]:.3e} {disp_defl}")
+            cols_reacciones[-1].metric("|y|max", f"{ydef/DEFLEXION_DISPLAY[disp_defl]:.3e} {disp_defl}")
 
         st.markdown("### Tabla (primeras filas)")
         # Renombrar columnas con unidades mostradas
@@ -467,26 +714,43 @@ with tabs[1]:
         st.markdown("### Diagramas")
         gtab = st.tabs(["Carga q(x)", "Cortante/Momento", "Deflexión"])
         with gtab[0]:
-            fig1, ax1 = plt.subplots(figsize=(6,2.4))
-            # Para q(x) se usa siempre el sistema actual (carga definida). Podría ampliarse a export.
-            plot_q(ax1, st.session_state.cargas, data['L'], data['E'], data['I'], u_len, u_w, u_force)
+            fig1, ax1 = plt.subplots(figsize=(8,3))
+            # Mostrar diagrama con reacciones
+            plot_diagrama_con_reacciones(ax1, st.session_state.cargas, data['L'], data['E'], data['I'], 
+                                        u_len, u_w, u_force, data.get('apoyos'), reacciones)
             st.pyplot(fig1)
         with gtab[1]:
-            fig2, (axv, axm) = plt.subplots(2,1, figsize=(6,5), sharex=True)
-            axv.plot(df["x"] / LENGTH_UNITS[disp_len], df["cortante"] / FORCE_UNITS[disp_force], color="#ff7f0e")
-            axv.set_ylabel(f"V [{disp_force}]")
-            axv.grid(alpha=0.3)
-            axm.plot(df["x"] / LENGTH_UNITS[disp_len], df["momento"] / (FORCE_UNITS[disp_force]*LENGTH_UNITS[disp_len]), color="#2ca02c")
-            axm.set_ylabel(f"M [{disp_force}·{disp_len}]")
-            axm.set_xlabel(f"x [{disp_len}]")
-            axm.grid(alpha=0.3)
+            fig2, (axv, axm) = plt.subplots(2,1, figsize=(8,6), sharex=True)
+            axv.plot(df["x"] / LENGTH_UNITS[disp_len], df["cortante"] / FORCE_UNITS[disp_force], 
+                    color="#ff7f0e", linewidth=2)
+            axv.set_ylabel(f"V [{disp_force}]", fontsize=11)
+            axv.grid(alpha=0.3, linestyle='--')
+            axv.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+            # Agregar apoyos en diagrama de cortante
+            plot_apoyos_en_diagrama(axv, data.get('apoyos', []), disp_len, y_pos=0)
+            
+            axm.plot(df["x"] / LENGTH_UNITS[disp_len], df["momento"] / (FORCE_UNITS[disp_force]*LENGTH_UNITS[disp_len]), 
+                    color="#2ca02c", linewidth=2)
+            axm.set_ylabel(f"M [{disp_force}·{disp_len}]", fontsize=11)
+            axm.set_xlabel(f"x [{disp_len}]", fontsize=11)
+            axm.grid(alpha=0.3, linestyle='--')
+            axm.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+            # Agregar apoyos en diagrama de momento
+            plot_apoyos_en_diagrama(axm, data.get('apoyos', []), disp_len, y_pos=0)
+            
+            fig2.tight_layout()
             st.pyplot(fig2)
         with gtab[2]:
-            fig3, ax3 = plt.subplots(figsize=(6,2.4))
-            ax3.plot(df["x"] / LENGTH_UNITS[disp_len], df["deflexion"] / DEFLEXION_DISPLAY[disp_defl], color="#9467bd")
-            ax3.set_ylabel(f"y [{disp_defl}]")
-            ax3.set_xlabel(f"x [{disp_len}]")
-            ax3.grid(alpha=0.3)
+            fig3, ax3 = plt.subplots(figsize=(8,3))
+            ax3.plot(df["x"] / LENGTH_UNITS[disp_len], df["deflexion"] / DEFLEXION_DISPLAY[disp_defl], 
+                    color="#9467bd", linewidth=2)
+            ax3.set_ylabel(f"y [{disp_defl}]", fontsize=11)
+            ax3.set_xlabel(f"x [{disp_len}]", fontsize=11)
+            ax3.grid(alpha=0.3, linestyle='--')
+            ax3.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+            # Agregar apoyos en diagrama de deflexión
+            plot_apoyos_en_diagrama(ax3, data.get('apoyos', []), disp_len, y_pos=0)
+            fig3.tight_layout()
             st.pyplot(fig3)
 
         st.markdown("### Descargas")
@@ -550,14 +814,16 @@ with tabs[2]:
     else:
         if st.button("🔍 Ejecutar verificación"):
             try:
-                viga_total = Viga(L, E, I)
+                apoyos_actuales = st.session_state.get("apoyos", [Apoyo(0.0, "A"), Apoyo(L, "B")])
+                
+                viga_total = Viga(L, E, I, apoyos=list(apoyos_actuales))
                 for c in st.session_state.cargas:
                     viga_total.agregar_carga(c)
                 df_total = generar_dataframe(viga_total, num_puntos=400)
                 xs = df_total["x"].to_numpy()
                 acumulado = pd.DataFrame({"x": xs, "cortante": 0.0, "momento": 0.0, "pendiente": 0.0, "deflexion": 0.0})
                 for c in st.session_state.cargas:
-                    v_tmp = Viga(L, E, I)
+                    v_tmp = Viga(L, E, I, apoyos=list(apoyos_actuales))
                     v_tmp.agregar_carga(c)
                     df_i = generar_dataframe(v_tmp, num_puntos=len(xs))
                     if not np.allclose(df_i["x"].to_numpy(), xs):

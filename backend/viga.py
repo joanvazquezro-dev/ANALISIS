@@ -49,7 +49,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import numpy as np
+import pandas as pd
 import sympy as sp
+
+# Importación condicional para evitar dependencia circular
+# generar_dataframe se importa dentro de calcular_reacciones cuando se necesita
 
 x = sp.symbols("x", real=True, nonnegative=True)
 
@@ -308,17 +312,54 @@ class CargaTriangular(CargaTrapezoidal):
 
 
 @dataclass
+class Apoyo:
+    """Representa un apoyo simple en una posición específica de la viga.
+    
+    Attributes
+    ----------
+    posicion : float
+        Posición del apoyo en metros desde el origen.
+    nombre : str
+        Identificador del apoyo (ej: 'A', 'B', 'C').
+    """
+    posicion: float
+    nombre: str = ""
+    
+    def __post_init__(self) -> None:
+        if self.posicion < 0:
+            raise ValueError("La posición del apoyo debe ser no negativa")
+        if not self.nombre:
+            self.nombre = f"R_{self.posicion:.2f}"
+
+
+@dataclass
 class Viga:
-    """Modelo de una viga simplemente apoyada.
+    """Modelo de una viga simplemente apoyada con apoyos configurables.
 
     Aporta métodos para construir expresiones simbólicas de cortante, momento,
     pendiente y deflexión. Si el proceso simbólico falla, existe un *fallback*
     numérico vectorizado.
+    
+    Attributes
+    ----------
+    longitud : float
+        Longitud total de la viga en metros.
+    E : float
+        Módulo de elasticidad en Pa.
+    I : float
+        Momento de inercia en m⁴.
+    apoyos : List[Apoyo]
+        Lista de apoyos. Por defecto se crean en x=0 y x=L.
+    cargas : List[Carga]
+        Lista de cargas aplicadas.
+    debug : bool
+        Activar mensajes de depuración.
     """
 
     longitud: float
     E: float
     I: float
+    apoyos: List[Apoyo] = field(default_factory=list)
     cargas: List[Carga] = field(default_factory=list)
     debug: bool = False  # Permite activar mensajes de depuración controladamente
     _reacciones: Optional[Dict[str, float]] = field(default=None, init=False, repr=False)
@@ -332,6 +373,54 @@ class Viga:
             raise ValueError("El módulo de elasticidad debe ser positivo")
         if self.I <= 0:
             raise ValueError("El momento de inercia debe ser positivo")
+        
+        # Si no se especifican apoyos, crear apoyos por defecto en extremos
+        if not self.apoyos:
+            self.apoyos = [
+                Apoyo(posicion=0.0, nombre="A"),
+                Apoyo(posicion=self.longitud, nombre="B")
+            ]
+        else:
+            # Validar que los apoyos estén dentro de la viga
+            for apoyo in self.apoyos:
+                if apoyo.posicion > self.longitud:
+                    raise ValueError(
+                        f"El apoyo '{apoyo.nombre}' en x={apoyo.posicion} está fuera de la viga (L={self.longitud})"
+                    )
+            # Ordenar apoyos por posición
+            self.apoyos.sort(key=lambda a: a.posicion)
+
+    def agregar_apoyo(self, apoyo: Apoyo) -> None:
+        """Agrega un apoyo verificando que esté dentro del dominio de la viga.
+        
+        Resetea las cachés de resultados para asegurar coherencia.
+        """
+        if apoyo.posicion > self.longitud:
+            raise ValueError(
+                f"El apoyo '{apoyo.nombre}' en x={apoyo.posicion} está fuera de la viga (L={self.longitud})"
+            )
+        
+        # Verificar que no haya un apoyo muy cercano (menos de 1mm)
+        for a in self.apoyos:
+            if abs(a.posicion - apoyo.posicion) < 1e-3:
+                raise ValueError(
+                    f"Ya existe un apoyo '{a.nombre}' muy cercano a x={apoyo.posicion}"
+                )
+        
+        self.apoyos.append(apoyo)
+        self.apoyos.sort(key=lambda a: a.posicion)
+        
+        # Invalidar cachés
+        self._reacciones = None
+        self._expresiones = None
+        self._lambdas = None
+    
+    def limpiar_apoyos(self) -> None:
+        """Elimina todos los apoyos e invalida cachés."""
+        self.apoyos.clear()
+        self._reacciones = None
+        self._expresiones = None
+        self._lambdas = None
 
     def agregar_carga(self, carga: Carga) -> None:
         """Agrega una carga verificando que esté dentro del dominio de la viga.
@@ -367,26 +456,284 @@ class Viga:
         self._expresiones = None
         self._lambdas = None
 
+    def tipo_sistema(self) -> str:
+        """Determina el tipo de sistema estructural.
+        
+        Returns
+        -------
+        str: 'hipostatico', 'isostatico', o 'hiperestatico'
+        """
+        n_apoyos = len(self.apoyos)
+        n_ecuaciones = 2  # Equilibrio vertical y momento
+        n_incognitas = n_apoyos  # Reacciones verticales
+        
+        if n_incognitas < n_ecuaciones:
+            return "hipostatico"  # Inestable, insuficientes apoyos
+        elif n_incognitas == n_ecuaciones:
+            return "isostatico"  # Estáticamente determinado
+        else:
+            return "hiperestatico"  # Estáticamente indeterminado
+    
+    def grado_hiperestaticidad(self) -> int:
+        """Retorna el grado de hiperestaticidad del sistema.
+        
+        Returns
+        -------
+        int: 0 para isostático, <0 para hipostático, >0 para hiperestático
+        """
+        n_apoyos = len(self.apoyos)
+        n_ecuaciones = 2  # Equilibrio para viga en 2D
+        return n_apoyos - n_ecuaciones
+    
+    def validar_sistema(self) -> Dict[str, any]:
+        """Valida el sistema estructural y retorna información de diagnóstico.
+        
+        Returns
+        -------
+        dict: {
+            'valido': bool,
+            'tipo': str,
+            'grado': int,
+            'mensajes': List[str],
+            'advertencias': List[str]
+        }
+        """
+        resultado = {
+            'valido': True,
+            'tipo': self.tipo_sistema(),
+            'grado': self.grado_hiperestaticidad(),
+            'mensajes': [],
+            'advertencias': []
+        }
+        
+        n_apoyos = len(self.apoyos)
+        
+        if n_apoyos == 0:
+            resultado['valido'] = False
+            resultado['mensajes'].append("❌ No hay apoyos definidos")
+            return resultado
+        
+        if n_apoyos == 1:
+            resultado['advertencias'].append("⚠️ Sistema hipostático (1 apoyo). Solo se puede analizar como ménsula si hay empotramiento")
+        
+        if resultado['tipo'] == 'hipostatico':
+            resultado['valido'] = False
+            resultado['mensajes'].append(f"❌ Sistema hipostático: insuficientes apoyos ({n_apoyos} < 2)")
+        elif resultado['tipo'] == 'isostatico':
+            resultado['mensajes'].append(f"✓ Sistema isostático: {n_apoyos} apoyos (estáticamente determinado)")
+        else:  # hiperestatico
+            grado = resultado['grado']
+            resultado['mensajes'].append(f"✓ Sistema hiperestático de grado {grado}: {n_apoyos} apoyos")
+            resultado['advertencias'].append(f"ℹ️ Se resolverá por método de compatibilidad de deflexiones")
+        
+        # Verificar separación mínima entre apoyos
+        for i in range(len(self.apoyos) - 1):
+            dist = self.apoyos[i+1].posicion - self.apoyos[i].posicion
+            if dist < 1e-3:
+                resultado['advertencias'].append(
+                    f"⚠️ Apoyos '{self.apoyos[i].nombre}' y '{self.apoyos[i+1].nombre}' muy cercanos (d={dist*1000:.2f} mm)"
+                )
+        
+        # Verificar que haya cargas
+        if not self.cargas:
+            resultado['advertencias'].append("⚠️ No hay cargas aplicadas")
+        
+        return resultado
+    
     def calcular_reacciones(self) -> Dict[str, float]:
-        """Calcula y memoriza las reacciones en apoyos A (x=0) y B (x=L).
+        """Calcula y memoriza las reacciones en todos los apoyos.
 
-        Método: equilibrio estático en 2D (solo fuerzas verticales):
-        RA + RB = ΣF
-        RB * L = Σ( F_i * distancia_i_al_origen )
+        Para 1 apoyo: ménsula (hipostático sin empotramiento)
+        Para 2 apoyos: equilibrio estático (isostático)
+        Para n>2 apoyos: método de flexibilidad con compatibilidad de deflexiones
+        
+        El método general para sistemas hiperestáticos:
+        1. Selecciona apoyos extremos como primarios (isostático base)
+        2. Los apoyos intermedios son redundantes
+        3. Calcula deflexiones en apoyos redundantes debido a cargas
+        4. Aplica fuerzas unitarias en redundantes y calcula coeficientes de flexibilidad
+        5. Resuelve sistema: [δ] = [f]·{R_redundantes} + {δ_cargas}
+        6. Impone δ = 0 en apoyos reales
 
         Returns
         -------
-        dict: {'RA': float, 'RB': float}
+        dict: {nombre_apoyo: reaccion_en_N, ...}
         """
         if self._reacciones is not None:
             return self._reacciones
-
-        suma_cargas = sum(c.total_load() for c in self.cargas)
-        momentos = sum(c.moment_about(0.0) for c in self.cargas)
-        RB = momentos / self.longitud if self.longitud != 0 else 0.0
-        RA = suma_cargas - RB
-        self._reacciones = {"RA": RA, "RB": RB}
-        return self._reacciones
+        
+        n_apoyos = len(self.apoyos)
+        if n_apoyos == 0:
+            raise ValueError("La viga debe tener al menos un apoyo")
+        
+        tipo = self.tipo_sistema()
+        
+        if n_apoyos == 1:
+            # Caso especial: un solo apoyo (sistema hipostático sin momento)
+            # Solo puede equilibrar si todas las cargas pasan por el apoyo
+            suma_cargas = sum(c.total_load() for c in self.cargas)
+            self._reacciones = {self.apoyos[0].nombre: suma_cargas}
+            
+            if self.debug:
+                print(f"[Viga] Sistema con 1 apoyo (hipostático): R={suma_cargas:.3f} N")
+            return self._reacciones
+        
+        if n_apoyos == 2:
+            # Caso simple: dos apoyos (estáticamente determinado)
+            apoyo_izq = self.apoyos[0]
+            apoyo_der = self.apoyos[1]
+            
+            suma_cargas = sum(c.total_load() for c in self.cargas)
+            
+            # Momentos respecto al apoyo izquierdo
+            momentos = sum(c.moment_about(apoyo_izq.posicion) for c in self.cargas)
+            
+            distancia = apoyo_der.posicion - apoyo_izq.posicion
+            if abs(distancia) < 1e-12:
+                raise ValueError("Los apoyos están demasiado cerca")
+            
+            R_der = momentos / distancia
+            R_izq = suma_cargas - R_der
+            
+            self._reacciones = {
+                apoyo_izq.nombre: R_izq,
+                apoyo_der.nombre: R_der
+            }
+            
+            if self.debug:
+                print(f"[Viga] Sistema isostático: R_{apoyo_izq.nombre}={R_izq:.3f} N, R_{apoyo_der.nombre}={R_der:.3f} N")
+            
+            return self._reacciones
+        
+        # Caso general: n apoyos (n >= 3) - estáticamente indeterminado (hiperestático)
+        # Método de compatibilidad: usar apoyos extremos como sistema primario
+        
+        if self.debug:
+            print(f"[Viga] Sistema hiperestático con {n_apoyos} apoyos (grado {n_apoyos - 2})")
+        
+        try:
+            import numpy as np
+            from scipy.integrate import quad
+            
+            # Identificar apoyos primarios (extremos) y redundantes (intermedios)
+            apoyo_izq = self.apoyos[0]
+            apoyo_der = self.apoyos[-1]
+            apoyos_redundantes = self.apoyos[1:-1]  # Apoyos intermedios
+            n_redundantes = len(apoyos_redundantes)
+            
+            if self.debug:
+                print(f"[Viga] Apoyos primarios: {apoyo_izq.nombre} (x={apoyo_izq.posicion}), {apoyo_der.nombre} (x={apoyo_der.posicion})")
+                print(f"[Viga] Apoyos redundantes: {[f'{a.nombre} (x={a.posicion})' for a in apoyos_redundantes]}")
+            
+            # Paso 1: Calcular reacciones del sistema primario (solo extremos) con todas las cargas
+            viga_primaria = Viga(self.longitud, self.E, self.I, 
+                               apoyos=[apoyo_izq, apoyo_der],
+                               debug=False)
+            for carga in self.cargas:
+                viga_primaria.agregar_carga(carga)
+            
+            reacciones_primarias = viga_primaria.calcular_reacciones()
+            
+            # Paso 2: Calcular deflexiones en posiciones de apoyos redundantes (sistema primario con cargas)
+            try:
+                from backend.calculos import generar_dataframe
+                df_primario = generar_dataframe(viga_primaria, num_puntos=1000)
+            except:
+                # Fallback: evaluar numéricamente
+                resultados_primarios = viga_primaria._evaluar_numerico(1000)
+                df_primario = pd.DataFrame(resultados_primarios)
+            
+            # Interpolar deflexiones en posiciones de apoyos redundantes
+            deflexiones_cargas = np.zeros(n_redundantes)
+            for i, apoyo_red in enumerate(apoyos_redundantes):
+                # Encontrar deflexión en la posición del apoyo redundante
+                idx = np.argmin(np.abs(df_primario['x'].to_numpy() - apoyo_red.posicion))
+                deflexiones_cargas[i] = df_primario.iloc[idx]['deflexion']
+            
+            if self.debug:
+                print(f"[Viga] Deflexiones por cargas en redundantes: {deflexiones_cargas}")
+            
+            # Paso 3: Calcular coeficientes de flexibilidad
+            # f_ij = deflexión en apoyo i debido a REACCIÓN unitaria (hacia arriba) en apoyo j
+            # Para carga unitaria hacia abajo, la deflexión es negativa
+            # Para reacción unitaria hacia arriba, la deflexión es positiva
+            matriz_flexibilidad = np.zeros((n_redundantes, n_redundantes))
+            
+            for j, apoyo_j in enumerate(apoyos_redundantes):
+                # Aplicar REACCIÓN unitaria en apoyo j (hacia arriba = carga -1.0 hacia abajo)
+                viga_unitaria = Viga(self.longitud, self.E, self.I,
+                                   apoyos=[apoyo_izq, apoyo_der],
+                                   debug=False)
+                # Carga negativa = reacción hacia arriba
+                carga_unitaria = CargaPuntual(magnitud=-1.0, posicion=apoyo_j.posicion)
+                viga_unitaria.agregar_carga(carga_unitaria)
+                
+                try:
+                    from backend.calculos import generar_dataframe
+                    df_unit = generar_dataframe(viga_unitaria, num_puntos=1000)
+                except:
+                    resultados_unit = viga_unitaria._evaluar_numerico(1000)
+                    df_unit = pd.DataFrame(resultados_unit)
+                
+                # Calcular deflexiones en todos los apoyos redundantes
+                for i, apoyo_i in enumerate(apoyos_redundantes):
+                    idx = np.argmin(np.abs(df_unit['x'].to_numpy() - apoyo_i.posicion))
+                    matriz_flexibilidad[i, j] = df_unit.iloc[idx]['deflexion']
+            
+            if self.debug:
+                print(f"[Viga] Matriz de flexibilidad:\n{matriz_flexibilidad}")
+            
+            # Paso 4: Resolver sistema [f]·{R_redundantes} + {δ_cargas} = 0
+            # Las deflexiones totales deben ser cero en los apoyos
+            # δ_total = δ_cargas + f·R = 0
+            # Por lo tanto: R = -f^(-1)·δ_cargas
+            reacciones_redundantes = np.linalg.solve(matriz_flexibilidad, -deflexiones_cargas)
+            
+            if self.debug:
+                print(f"[Viga] Reacciones redundantes: {reacciones_redundantes}")
+            
+            # Paso 5: Calcular reacciones finales en apoyos primarios
+            # Las reacciones redundantes (hacia arriba) afectan a los apoyos extremos
+            # Superposición: aplicar las reacciones redundantes como cargas hacia abajo
+            viga_redundantes = Viga(self.longitud, self.E, self.I,
+                                  apoyos=[apoyo_izq, apoyo_der],
+                                  debug=False)
+            for i, apoyo_red in enumerate(apoyos_redundantes):
+                # Reacción hacia arriba = carga equivalente negativa
+                carga_equivalente = CargaPuntual(magnitud=-reacciones_redundantes[i], 
+                                               posicion=apoyo_red.posicion)
+                viga_redundantes.agregar_carga(carga_equivalente)
+            
+            reacciones_por_redundantes = viga_redundantes.calcular_reacciones()
+            
+            # Superposición final
+            R_izq_total = reacciones_primarias[apoyo_izq.nombre] + reacciones_por_redundantes[apoyo_izq.nombre]
+            R_der_total = reacciones_primarias[apoyo_der.nombre] + reacciones_por_redundantes[apoyo_der.nombre]
+            
+            # Construir diccionario de reacciones completo
+            self._reacciones = {
+                apoyo_izq.nombre: R_izq_total,
+                apoyo_der.nombre: R_der_total
+            }
+            
+            # Las reacciones redundantes son positivas hacia arriba
+            for i, apoyo_red in enumerate(apoyos_redundantes):
+                self._reacciones[apoyo_red.nombre] = float(reacciones_redundantes[i])
+            
+            if self.debug:
+                print(f"[Viga] Reacciones finales: {self._reacciones}")
+                suma_reacciones = sum(self._reacciones.values())
+                suma_cargas_total = sum(c.total_load() for c in self.cargas)
+                print(f"[Viga] Verificación: ΣR={suma_reacciones:.6f} N, ΣF={suma_cargas_total:.6f} N, error={abs(suma_reacciones - suma_cargas_total):.6e} N")
+            
+            return self._reacciones
+            
+        except Exception as e:
+            if self.debug:
+                import traceback
+                print(f"[Viga] Error calculando reacciones hiperestáticas: {e}")
+                traceback.print_exc()
+            raise RuntimeError(f"No se pudieron calcular las reacciones hiperestáticas: {e}")
 
     # ----------------------- Construcción simbólica -----------------------
 
@@ -397,11 +744,22 @@ class Viga:
         en el *fallback* numérico (vectorizado) evitando recomputaciones.
         """
         reacciones = self.calcular_reacciones()
-        V_expr = sp.Float(reacciones["RA"])
+        
+        # Comenzar con la primera reacción (apoyo más a la izquierda)
+        if self.apoyos:
+            primer_apoyo = self.apoyos[0]
+            V_expr = sp.Float(reacciones[primer_apoyo.nombre])
+        else:
+            V_expr = sp.Float(0.0)
+        
+        # Agregar contribuciones de las cargas
         for carga in self.cargas:
             V_expr += carga.shear_expression(x)
-        # Reacción derecha: se activa sólo para x > L (Heaviside con valor 0 en x=L)
-        V_expr += reacciones["RB"] * heaviside(x - self.longitud)
+        
+        # Agregar reacciones de los demás apoyos (activan con Heaviside)
+        for apoyo in self.apoyos[1:]:
+            V_expr += reacciones[apoyo.nombre] * heaviside(x - apoyo.posicion)
+        
         return sp.simplify(V_expr)
 
     def _construir_expresiones(self) -> Dict[str, sp.Expr]:
@@ -411,12 +769,12 @@ class Viga:
         1. Construir V(x).
         2. Integrar para M(x) (ruta principal y alternativa).
         3. Integrar M/EI para θ(x) y luego para y(x) (con fallback simplificado).
-        4. Aplicar condiciones de borde y(0)=0, y(L)=0.
+        4. Aplicar condiciones de borde y(x_apoyo_i)=0 para todos los apoyos.
         """
         if self._expresiones is not None:
             return self._expresiones
         if self.debug:
-            print(f"[Viga] Construyendo expresiones simbólicas (L={self.longitud}, cargas={len(self.cargas)})")
+            print(f"[Viga] Construyendo expresiones simbólicas (L={self.longitud}, cargas={len(self.cargas)}, apoyos={len(self.apoyos)})")
 
         try:
             V_expr = self._construir_cortante_expr()
@@ -445,7 +803,8 @@ class Viga:
                     if isinstance(c, CargaMomento):
                         a = float(c.posicion)
                         # Si el momento está exactamente en un apoyo y en_vano es False, no aplicar el salto dentro del vano
-                        if (abs(a - 0.0) < 1e-12 or abs(a - float(self.longitud)) < 1e-12) and not c.en_vano:
+                        esta_en_apoyo = any(abs(a - apoyo.posicion) < 1e-12 for apoyo in self.apoyos)
+                        if esta_en_apoyo and not c.en_vano:
                             continue
                         M_expr += sp.Float(c.magnitud) * heaviside_half(x - c.posicion)
                 M_expr = sp.simplify(M_expr)
@@ -454,36 +813,55 @@ class Viga:
             if EI == 0:
                 raise ValueError("El producto EI no puede ser cero")
 
-            C1, C2 = sp.symbols("C1 C2")
-            try:
-                theta_expr = sp.integrate(M_expr / EI, x) + C1
-                y_expr = sp.integrate(theta_expr, x) + C2
-            except Exception as e:
-                if self.debug:
-                    print(f"[Viga] Advertencia integración deflexión: {e}")
+            # Para 2 apoyos: usar C1, C2 y resolver con y(apoyo1)=0, y(apoyo2)=0
+            # Para n>2 apoyos: necesitamos n constantes o usar método simplificado
+            
+            n_apoyos = len(self.apoyos)
+            
+            if n_apoyos <= 2:
+                # Caso clásico con 2 constantes
+                C1, C2 = sp.symbols("C1 C2")
                 try:
-                    theta_expr = sp.simplify(M_expr / EI) * x + C1
+                    theta_expr = sp.integrate(M_expr / EI, x) + C1
                     y_expr = sp.integrate(theta_expr, x) + C2
-                except Exception as e2:
+                except Exception as e:
                     if self.debug:
-                        print(f"[Viga] Error en alternativa de deflexión: {e2}")
-                    raise RuntimeError(f"No se pudo calcular las expresiones de deflexión: {e}")
+                        print(f"[Viga] Advertencia integración deflexión: {e}")
+                    try:
+                        theta_expr = sp.simplify(M_expr / EI) * x + C1
+                        y_expr = sp.integrate(theta_expr, x) + C2
+                    except Exception as e2:
+                        if self.debug:
+                            print(f"[Viga] Error en alternativa de deflexión: {e2}")
+                        raise RuntimeError(f"No se pudo calcular las expresiones de deflexión: {e}")
 
-            ecuaciones = [
-                sp.Eq(y_expr.subs(x, 0), 0),
-                sp.Eq(y_expr.subs(x, self.longitud), 0),
-            ]
-            try:
-                solucion = sp.solve(ecuaciones, (C1, C2), simplify=True, dict=True)
-                if not solucion:
-                    raise RuntimeError("No fue posible determinar las constantes de integración")
-                constants = solucion[0]
-                theta_expr = sp.simplify(theta_expr.subs(constants))
-                y_expr = sp.simplify(y_expr.subs(constants))
-            except Exception as e:
+                # Aplicar condiciones de borde en los apoyos disponibles
+                ecuaciones = []
+                for apoyo in self.apoyos[:2]:  # Usar los primeros 2 apoyos
+                    ecuaciones.append(sp.Eq(y_expr.subs(x, apoyo.posicion), 0))
+                
+                # Si solo hay 1 apoyo, agregar condición de momento nulo ahí
+                if n_apoyos == 1:
+                    ecuaciones.append(sp.Eq(M_expr.subs(x, self.apoyos[0].posicion), 0))
+                
+                try:
+                    solucion = sp.solve(ecuaciones, (C1, C2), simplify=True, dict=True)
+                    if not solucion:
+                        raise RuntimeError("No fue posible determinar las constantes de integración")
+                    constants = solucion[0]
+                    theta_expr = sp.simplify(theta_expr.subs(constants))
+                    y_expr = sp.simplify(y_expr.subs(constants))
+                except Exception as e:
+                    if self.debug:
+                        print(f"[Viga] Error resolviendo constantes: {e}")
+                    raise RuntimeError(f"Error al determinar constantes de integración: {e}")
+            
+            else:
+                # Para n>2 apoyos: resolver sistema con más constantes o usar método numérico
+                # Por simplicidad, usamos método numérico directo
                 if self.debug:
-                    print(f"[Viga] Error resolviendo constantes: {e}")
-                raise RuntimeError(f"Error al determinar constantes de integración: {e}")
+                    print("[Viga] Sistema con >2 apoyos: usando integración numérica directa")
+                raise RuntimeError("Sistema con >2 apoyos: se requiere método numérico")
 
             self._expresiones = {"V": V_expr, "M": M_expr, "theta": theta_expr, "deflexion": y_expr}
             return self._expresiones
@@ -547,17 +925,27 @@ class Viga:
             V_func = sp.lambdify(x, V_expr, "numpy")
             V_vals = np.asarray(V_func(x_vals), dtype=float)
         except Exception as e:
-            # Último recurso: construir manualmente RA + sum(shear_i)
+            # Último recurso: construir manualmente R_primer_apoyo + sum(shear_i) + otras reacciones
             if self.debug:
                 print(f"[Viga] Falla construyendo V_expr ({e}), usando suma incremental")
             reacciones = self.calcular_reacciones()
-            V_vals = np.full_like(x_vals, reacciones["RA"], dtype=float)
+            
+            if self.apoyos:
+                V_vals = np.full_like(x_vals, reacciones[self.apoyos[0].nombre], dtype=float)
+            else:
+                V_vals = np.zeros_like(x_vals, dtype=float)
+            
             for carga in self.cargas:
                 try:
                     contrib = sp.lambdify(x, carga.shear_expression(x), "numpy")(x_vals)
                     V_vals += np.asarray(contrib, dtype=float)
                 except Exception:
                     continue
+            
+            # Agregar reacciones de apoyos restantes
+            for apoyo in self.apoyos[1:]:
+                step = (x_vals >= apoyo.posicion).astype(float)
+                V_vals += reacciones[apoyo.nombre] * step
 
         # Integraciones sucesivas
         M_vals = cumulative_trapezoid(V_vals, x_vals, initial=0.0)
@@ -567,21 +955,44 @@ class Viga:
                 if isinstance(c, CargaMomento):
                     a = float(c.posicion)
                     # Si es en apoyo y en_vano=False, no afectar el vano
-                    if (abs(a - 0.0) < 1e-12 or abs(a - float(self.longitud)) < 1e-12) and not c.en_vano:
+                    esta_en_apoyo = any(abs(a - apoyo.posicion) < 1e-12 for apoyo in self.apoyos)
+                    if esta_en_apoyo and not c.en_vano:
                         continue
                     step = (x_vals > a).astype(float)
                     # Si existe un nodo exactamente en a, añadir 1/2 en ese punto para H(0)=1/2
                     eq_mask = np.isclose(x_vals, a)
                     step = step + 0.5 * eq_mask.astype(float)
                     M_vals = M_vals + float(c.magnitud) * step
+        
         EI = self.E * self.I
         theta_vals = cumulative_trapezoid(M_vals / EI, x_vals, initial=0.0)
         y_vals = cumulative_trapezoid(theta_vals, x_vals, initial=0.0)
 
-        # Ajustar condiciones de borde y(0)=y(L)=0
-        if len(x_vals) > 1 and abs(y_vals[-1]) > 0:
-            Ltot = x_vals[-1]
-            y_vals -= (x_vals / Ltot) * y_vals[-1]
+        # Ajustar condiciones de borde y(x_apoyo_i)=0 para todos los apoyos
+        if len(self.apoyos) >= 2:
+            # Para 2 apoyos: ajuste lineal
+            apoyo1 = self.apoyos[0]
+            apoyo2 = self.apoyos[1]
+            
+            # Encontrar índices más cercanos a los apoyos
+            idx1 = np.argmin(np.abs(x_vals - apoyo1.posicion))
+            idx2 = np.argmin(np.abs(x_vals - apoyo2.posicion))
+            
+            # Corrección lineal para forzar y=0 en ambos apoyos
+            y1 = y_vals[idx1]
+            y2 = y_vals[idx2]
+            
+            x1 = x_vals[idx1]
+            x2 = x_vals[idx2]
+            
+            if abs(x2 - x1) > 1e-12:
+                # Ajuste lineal: y_corregido = y - (y1 + (y2-y1)/(x2-x1) * (x-x1))
+                pendiente = (y2 - y1) / (x2 - x1)
+                y_vals = y_vals - (y1 + pendiente * (x_vals - x1))
+        elif len(self.apoyos) == 1:
+            # Un solo apoyo: ajustar para y=0 en ese apoyo
+            idx = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
+            y_vals = y_vals - y_vals[idx]
 
         return {
             "x": [float(v) for v in x_vals],
