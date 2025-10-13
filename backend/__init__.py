@@ -7,10 +7,12 @@ from .viga import (
     CargaUniforme,
     CargaTriangular,
     CargaTrapezoidal,
+    Apoyo
 )
 from . import calculos, menus, utils
 
 __all__ = [
+    "Apoyo",
     "Viga",
     "Carga",
     "CargaPuntual",
