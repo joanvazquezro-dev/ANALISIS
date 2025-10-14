@@ -174,3 +174,164 @@ def discretizar(expr: sp.Expr, L: float, num_puntos: int = 400) -> Tuple[np.ndar
     func = sp.lambdify(x, expr, "numpy")
     valores = func(x_vals)
     return x_vals, valores
+
+
+# ============================================================
+# MUESTREO POR EVENTOS Y EVALUACIÓN EN MALLA PERSONALIZADA
+# ============================================================
+
+def get_event_positions(viga: Viga) -> Dict[str, np.ndarray]:
+    """
+    Retorna posiciones relevantes (eventos) a lo largo de la viga:
+    - 0, L
+    - posiciones de apoyos
+    - inicios y fines de cargas distribuidas
+    - posiciones de cargas puntuales y momentos puntuales
+
+    Útil para construir una malla de muestreo que capture saltos.
+    """
+    eventos = set([0.0, float(viga.longitud)])
+    # Apoyos
+    for a in viga.apoyos:
+        eventos.add(float(a.posicion))
+    # Cargas
+    for c in viga.cargas:
+        if c.__class__.__name__ == 'CargaPuntual':
+            eventos.add(float(getattr(c, 'posicion')))
+        elif c.__class__.__name__ == 'CargaMomento':
+            eventos.add(float(getattr(c, 'posicion')))
+        else:
+            # Tipos con tramo: Uniforme, Triangular, Trapezoidal
+            for key in ('inicio', 'fin'):
+                if hasattr(c, key):
+                    eventos.add(float(getattr(c, key)))
+    xs = np.array(sorted(eventos), dtype=float)
+    return {
+        'todos': xs,
+        'apoyos': np.array(sorted({float(a.posicion) for a in viga.apoyos}), dtype=float),
+        'puntuales': np.array(sorted({float(getattr(c, 'posicion')) for c in viga.cargas if c.__class__.__name__ == 'CargaPuntual'}), dtype=float),
+        'momentos': np.array(sorted({float(getattr(c, 'posicion')) for c in viga.cargas if c.__class__.__name__ == 'CargaMomento'}), dtype=float),
+        'tramos': np.array(sorted({float(getattr(c, k)) for c in viga.cargas for k in ('inicio','fin') if hasattr(c, k)}), dtype=float),
+    }
+
+
+def muestreo_eventos(viga: Viga, puntos_por_tramo: int = 40, delta_frac: float = 1e-6) -> np.ndarray:
+    """
+    Construye malla de x concentrando puntos cerca de discontinuidades.
+    - Inserta x-δ y x+δ alrededor de eventos relevantes
+    - Discretiza uniformemente entre eventos
+    """
+    ev = get_event_positions(viga)
+    xs = ev['todos']
+    L = float(viga.longitud)
+    delta = max(1e-12, delta_frac * L)
+
+    x_grid: list[float] = []
+    for i in range(len(xs)):
+        xi = xs[i]
+        # Añadir puntos alrededor de discontinuidades de V y M
+        # V salta en apoyos y cargas puntuales; M salta en momentos puntuales
+        es_discontinuidad_V = (xi in set(ev['apoyos'])) or (xi in set(ev['puntuales']))
+        es_discontinuidad_M = (xi in set(ev['momentos']))
+        if es_discontinuidad_V or es_discontinuidad_M:
+            x_grid.extend([max(0.0, xi - delta), xi, min(L, xi + delta)])
+        else:
+            x_grid.append(xi)
+        # Puntos intermedios hasta el siguiente evento
+        if i < len(xs) - 1:
+            xj = xs[i+1]
+            if xj - xi > 1e-12:
+                internos = np.linspace(xi, xj, puntos_por_tramo, endpoint=False)[1:]
+                x_grid.extend(internos.tolist())
+
+    # Garantizar punto final L
+    if x_grid[-1] < L:
+        x_grid.append(L)
+    return np.array(sorted(set(x_grid)), dtype=float)
+
+
+def evaluar_con_malla(viga: Viga, x_grid: np.ndarray) -> Dict[str, np.ndarray]:
+    """
+    Evalúa V, M, θ, y sobre una malla arbitraria x_grid.
+    - Usa construcción simbólica de V(x) y evaluación numérica vectorizada
+    - Integra numéricamente para M, θ, y
+    - Añade saltos de momentos puntuales en M
+    - Ajusta y=0 en apoyos
+    """
+    import sympy as sp
+    from scipy.integrate import cumulative_trapezoid
+    import numpy as np
+    from .viga import x as x_sym, CargaMomento
+
+    # Cortante simbólico y evaluación numérica
+    V_expr = viga._construir_cortante_expr()
+    V_func = sp.lambdify(x_sym, V_expr, 'numpy')
+    V_vals = np.asarray(V_func(x_grid), dtype=float)
+
+    # Integra para M
+    M_vals = cumulative_trapezoid(V_vals, x_grid, initial=0.0)
+
+    # Añadir saltos de momentos puntuales
+    if any(c.__class__.__name__ == 'CargaMomento' for c in viga.cargas):
+        L = float(viga.longitud)
+        tol = max(1e-12, 1e-9 * L)
+        for c in viga.cargas:
+            if c.__class__.__name__ != 'CargaMomento':
+                continue
+            a = float(getattr(c, 'posicion'))
+            # Si momento en apoyo con en_vano=False, omitir salto
+            esta_en_apoyo = any(abs(a - ap.posicion) < 1e-12 for ap in viga.apoyos)
+            en_vano = bool(getattr(c, 'en_vano', True))
+            if esta_en_apoyo and not en_vano:
+                continue
+            step = np.zeros_like(x_grid, dtype=float)
+            step[x_grid < (a - tol)] = 0.0
+            step[np.abs(x_grid - a) <= tol] = 0.5
+            step[x_grid > (a + tol)] = 1.0
+            M_vals = M_vals + float(getattr(c, 'magnitud')) * step
+
+    # θ y y
+    EI = float(viga.E * viga.I)
+    theta_vals = cumulative_trapezoid(M_vals / EI, x_grid, initial=0.0)
+    y_vals = cumulative_trapezoid(theta_vals, x_grid, initial=0.0)
+
+    # Ajuste de condiciones de borde en apoyos
+    if len(viga.apoyos) >= 2:
+        a1 = float(viga.apoyos[0].posicion)
+        a2 = float(viga.apoyos[1].posicion)
+        i1 = int(np.argmin(np.abs(x_grid - a1)))
+        i2 = int(np.argmin(np.abs(x_grid - a2)))
+        x1, x2 = x_grid[i1], x_grid[i2]
+        y1, y2 = y_vals[i1], y_vals[i2]
+        if abs(x2 - x1) > 1e-15:
+            m = (y2 - y1) / (x2 - x1)
+            y_vals = y_vals - (y1 + m * (x_grid - x1))
+    elif len(viga.apoyos) == 1:
+        a = float(viga.apoyos[0].posicion)
+        i0 = int(np.argmin(np.abs(x_grid - a)))
+        y_vals = y_vals - y_vals[i0]
+
+    return {
+        'x': x_grid,
+        'V': V_vals,
+        'M': M_vals,
+        'theta': theta_vals,
+        'deflexion': y_vals,
+    }
+
+
+def generar_dataframe_eventos(viga: Viga, puntos_por_tramo: int = 40) -> pd.DataFrame:
+    """
+    Genera DataFrame usando muestreo por eventos para capturar saltos nítidos
+    en V(x) y M(x).
+    """
+    x_grid = muestreo_eventos(viga, puntos_por_tramo=puntos_por_tramo)
+    datos = evaluar_con_malla(viga, x_grid)
+    df = pd.DataFrame({
+        'x': datos['x'],
+        'cortante': datos['V'],
+        'momento': datos['M'],
+        'pendiente': datos['theta'],
+        'deflexion': datos['deflexion'],
+    })
+    return df

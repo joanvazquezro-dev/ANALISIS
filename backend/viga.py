@@ -64,7 +64,6 @@ HIPÓTESIS DEL MODELO:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -92,12 +91,12 @@ __all__ = [
 # Variable simbólica para posición a lo largo de la viga
 x = sp.symbols("x", real=True, nonnegative=True)
 
-
 # ============================================================
 # FUNCIONES MATEMÁTICAS (Heaviside y Macaulay)
 # ============================================================
 # Estas funciones permiten construir expresiones matemáticas
 # que cambian en puntos específicos, muy útil para vigas
+
 
 def heaviside(val: sp.Expr) -> sp.Heaviside:
     """
@@ -769,8 +768,6 @@ class Viga:
             print(f"[Viga] Sistema hiperestático con {n_apoyos} apoyos (grado {n_apoyos - 2})")
         
         try:
-            import numpy as np
-            from scipy.integrate import quad
             
             # Identificar apoyos primarios (extremos) y redundantes (intermedios)
             apoyo_izq = self.apoyos[0]
@@ -903,22 +900,20 @@ class Viga:
         en el *fallback* numérico (vectorizado) evitando recomputaciones.
         """
         reacciones = self.calcular_reacciones()
-        
-        # Comenzar con la primera reacción (apoyo más a la izquierda)
-        if self.apoyos:
-            primer_apoyo = self.apoyos[0]
-            V_expr = sp.Float(reacciones[primer_apoyo.nombre])
-        else:
-            V_expr = sp.Float(0.0)
-        
-        # Agregar contribuciones de las cargas
+
+        # Iniciar desde 0 y sumar TODAS las reacciones con Heaviside,
+        # incluyendo el primer apoyo. Esto evita aportar reacción antes
+        # de su posición cuando el primer apoyo no está en x=0.
+        V_expr = sp.Float(0.0)
+
+        # Agregar reacciones de todos los apoyos (activan con Heaviside)
+        for apoyo in self.apoyos:
+            V_expr += sp.Float(reacciones[apoyo.nombre]) * heaviside(x - apoyo.posicion)
+
+        # Agregar contribuciones de las cargas (signo negativo introduce saltos descendentes)
         for carga in self.cargas:
             V_expr += carga.shear_expression(x)
-        
-        # Agregar reacciones de los demás apoyos (activan con Heaviside)
-        for apoyo in self.apoyos[1:]:
-            V_expr += reacciones[apoyo.nombre] * heaviside(x - apoyo.posicion)
-        
+
         return sp.simplify(V_expr)
 
     def _construir_expresiones(self) -> Dict[str, sp.Expr]:
@@ -1069,6 +1064,39 @@ class Viga:
             for clave, func in self._lambdas.items():
                 valores = func(x_vals)  # type: ignore[arg-type]
                 resultados[clave] = [float(v) for v in np.asarray(valores)]
+            
+            # ============================================================
+            # AJUSTAR M PARA GARANTIZAR M=0 EN APOYOS (RUTA SIMBÓLICA)
+            # ============================================================
+            # Aplicar la misma corrección que en el método numérico
+            # para garantizar consistencia: M(apoyos) = 0
+            if "M" in resultados:
+                M_vals = np.array(resultados["M"])
+                n_ap = len(self.apoyos)
+                
+                if n_ap >= 2:
+                    # Encontrar índices de los apoyos extremos
+                    idx_izq = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
+                    idx_der = np.argmin(np.abs(x_vals - self.apoyos[-1].posicion))
+                    
+                    # Valores actuales de momento en los extremos
+                    M_izq = M_vals[idx_izq]
+                    M_der = M_vals[idx_der]
+                    
+                    # Corrección lineal para forzar M=0 en ambos extremos
+                    x_izq = x_vals[idx_izq]
+                    x_der = x_vals[idx_der]
+                    
+                    if abs(x_der - x_izq) > 1e-12:
+                        pendiente_M = (M_der - M_izq) / (x_der - x_izq)
+                        M_vals = M_vals - (M_izq + pendiente_M * (x_vals - x_izq))
+                        resultados["M"] = [float(v) for v in M_vals]
+                elif n_ap == 1:
+                    # Un solo apoyo: ajustar para M=0 en ese apoyo
+                    idx = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
+                    M_vals = M_vals - M_vals[idx]
+                    resultados["M"] = [float(v) for v in M_vals]
+            
             return resultados
         except Exception as e:
             if self.debug:
@@ -1111,23 +1139,20 @@ class Viga:
             if self.debug:
                 print(f"[Viga] Falla construyendo V_expr ({e}), usando suma incremental")
             reacciones = self.calcular_reacciones()
-            
-            if self.apoyos:
-                V_vals = np.full_like(x_vals, reacciones[self.apoyos[0].nombre], dtype=float)
-            else:
-                V_vals = np.zeros_like(x_vals, dtype=float)
-            
+            # Construcción consistente con la simbólica: iniciar en 0 y sumar
+            # reacciones de todos los apoyos con escalón en su posición
+            V_vals = np.zeros_like(x_vals, dtype=float)
+            for apoyo in self.apoyos:
+                step = (x_vals >= apoyo.posicion).astype(float)
+                V_vals += float(reacciones[apoyo.nombre]) * step
+
             for carga in self.cargas:
                 try:
                     contrib = sp.lambdify(x, carga.shear_expression(x), "numpy")(x_vals)
                     V_vals += np.asarray(contrib, dtype=float)
                 except Exception:
                     continue
-            
-            # Agregar reacciones de apoyos restantes
-            for apoyo in self.apoyos[1:]:
-                step = (x_vals >= apoyo.posicion).astype(float)
-                V_vals += reacciones[apoyo.nombre] * step
+
 
         # Integraciones sucesivas: M(x) = ∫V(x)dx
         M_vals = cumulative_trapezoid(V_vals, x_vals, initial=0.0)
@@ -1161,10 +1186,12 @@ class Viga:
                     # = 1 si x > a
                     step = np.zeros_like(x_vals, dtype=float)
                     
+                    # Tolerancia relativa a L para estabilidad numérica
+                    tol = max(1e-12, 1e-9 * float(self.longitud))
                     # Identificar regiones
-                    mask_antes = x_vals < (a - 1e-9)  # Antes del momento
-                    mask_exacto = np.abs(x_vals - a) <= 1e-9  # En el momento (tolerancia muy pequeña)
-                    mask_despues = x_vals > (a + 1e-9)  # Después del momento
+                    mask_antes = x_vals < (a - tol)  # Antes del momento
+                    mask_exacto = np.abs(x_vals - a) <= tol  # En el momento (tolerancia relativa)
+                    mask_despues = x_vals > (a + tol)  # Después del momento
                     
                     # Asignar valores de Heaviside
                     step[mask_antes] = 0.0
@@ -1174,13 +1201,65 @@ class Viga:
                     # Aplicar salto con el signo del momento
                     M_vals = M_vals + float(c.magnitud) * step
         
+        # ============================================================
+        # AJUSTAR M(x) PARA GARANTIZAR M=0 EN APOYOS (CONDICIÓN DE BORDE)
+        # ============================================================
+        # Para apoyos simples: M(x_apoyo) debe ser cero
+        # Ajustamos con interpolación lineal para forzar M=0 en extremos
+        n_ap = len(self.apoyos)
+        if n_ap >= 2:
+            # Encontrar índices de los apoyos extremos
+            idx_izq = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
+            idx_der = np.argmin(np.abs(x_vals - self.apoyos[-1].posicion))
+            
+            # Valores actuales de momento en los extremos
+            M_izq = M_vals[idx_izq]
+            M_der = M_vals[idx_der]
+            
+            # Corrección lineal para forzar M=0 en ambos extremos
+            # M_corregido(x) = M(x) - (M_izq + (M_der - M_izq)/(x_der - x_izq) * (x - x_izq))
+            x_izq = x_vals[idx_izq]
+            x_der = x_vals[idx_der]
+            
+            if abs(x_der - x_izq) > 1e-12:
+                pendiente_M = (M_der - M_izq) / (x_der - x_izq)
+                M_vals = M_vals - (M_izq + pendiente_M * (x_vals - x_izq))
+        elif n_ap == 1:
+            # Un solo apoyo: ajustar para M=0 en ese apoyo
+            idx = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
+            M_vals = M_vals - M_vals[idx]
+        
         EI = self.E * self.I
         theta_vals = cumulative_trapezoid(M_vals / EI, x_vals, initial=0.0)
         y_vals = cumulative_trapezoid(theta_vals, x_vals, initial=0.0)
 
         # Ajustar condiciones de borde y(x_apoyo_i)=0 para todos los apoyos
-        if len(self.apoyos) >= 2:
-            # Para 2 apoyos: ajuste lineal
+        n_ap = len(self.apoyos)
+        if n_ap >= 3:
+            # Mínimos cuadrados: encontrar a, b que minimicen sum_i (y(x_i) - (a + b x_i))^2
+            x_supp = np.array([ap.posicion for ap in self.apoyos], dtype=float)
+            idxs = [int(np.argmin(np.abs(x_vals - xi))) for xi in x_supp]
+            y_supp = y_vals[idxs]
+
+            # Matriz de diseño para modelo lineal a + b x
+            A = np.column_stack([np.ones_like(x_supp), x_supp])
+            try:
+                coeffs, *_ = np.linalg.lstsq(A, y_supp, rcond=None)
+                a0, b0 = float(coeffs[0]), float(coeffs[1])
+                y_vals = y_vals - (a0 + b0 * x_vals)
+            except Exception:
+                # Fallback si falla LS: usar extremos como en caso de 2 apoyos
+                apoyo1 = self.apoyos[0]
+                apoyo2 = self.apoyos[1]
+                idx1 = int(np.argmin(np.abs(x_vals - apoyo1.posicion)))
+                idx2 = int(np.argmin(np.abs(x_vals - apoyo2.posicion)))
+                y1, y2 = y_vals[idx1], y_vals[idx2]
+                x1, x2 = x_vals[idx1], x_vals[idx2]
+                if abs(x2 - x1) > 1e-12:
+                    pendiente = (y2 - y1) / (x2 - x1)
+                    y_vals = y_vals - (y1 + pendiente * (x_vals - x1))
+        elif n_ap == 2:
+            # Para 2 apoyos: ajuste lineal exacto usando ambos
             apoyo1 = self.apoyos[0]
             apoyo2 = self.apoyos[1]
             
@@ -1199,7 +1278,7 @@ class Viga:
                 # Ajuste lineal: y_corregido = y - (y1 + (y2-y1)/(x2-x1) * (x-x1))
                 pendiente = (y2 - y1) / (x2 - x1)
                 y_vals = y_vals - (y1 + pendiente * (x_vals - x1))
-        elif len(self.apoyos) == 1:
+        elif n_ap == 1:
             # Un solo apoyo: ajustar para y=0 en ese apoyo
             idx = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
             y_vals = y_vals - y_vals[idx]

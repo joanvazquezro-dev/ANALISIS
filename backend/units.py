@@ -81,7 +81,7 @@ UNIT_SYSTEMS = {
     },
     "Entrada masa (kg/m)": {
         "len": "m", 
-        "force": "N", 
+        "force": "kgf", 
         "w": "kg/m",  # La app convierte automáticamente kg/m → N/m
         "E": "Pa", 
         "I": "m^4", 

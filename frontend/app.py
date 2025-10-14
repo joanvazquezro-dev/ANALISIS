@@ -50,7 +50,14 @@ from backend.viga import (
     CargaTrapezoidal,
     CargaMomento,
 )
-from backend.calculos import generar_dataframe, obtener_maximos, discretizar
+from backend.calculos import (
+    generar_dataframe,
+    generar_dataframe_eventos,
+    obtener_maximos,
+    discretizar,
+    muestreo_eventos,
+    get_event_positions,
+)
 from backend.utils import exportar_tabla, exportar_grafica, asegurar_directorios, convertir_dataframe_export, exportar_configuracion
 from backend.units import (
     LENGTH_UNITS,
@@ -161,11 +168,16 @@ _defaults_si = {
 for k, v in _defaults_si.items():
     st.session_state.setdefault(k, v)
 st.session_state.setdefault("unit_system", "SI (N, m)")
+st.session_state.setdefault("prev_unit_system", "SI (N, m)")
 
 st.sidebar.markdown("### Sistema de unidades")
+
+# Detectar cambio de sistema de unidades
+prev_system = st.session_state.get("prev_unit_system", "SI (N, m)")
 chosen_system = st.sidebar.selectbox("Sistema", list(UNIT_SYSTEMS.keys()), key="unit_system")
 sys_map = UNIT_SYSTEMS[chosen_system]
 
+# Unidades de visualización basadas en el sistema elegido
 u_len = sys_map["len"]
 u_force = sys_map["force"]
 u_w = sys_map["w"]
@@ -173,10 +185,18 @@ u_E = sys_map["E"]
 u_I = sys_map["I"]
 u_defl_disp = sys_map["defl"]
 
-with st.sidebar.expander("Unidades de exportación", expanded=False):
-    exp_len = st.selectbox("Longitud exp", list(LENGTH_UNITS.keys()), key="exp_len")
-    exp_force = st.selectbox("Fuerza exp", list(FORCE_UNITS.keys()), key="exp_force")
-    exp_defl = st.selectbox("Deflexión exp", list(DEFLEXION_DISPLAY.keys()), key="exp_defl")
+# Las unidades de exportación ahora son las mismas que las de visualización
+exp_len = u_len
+exp_force = u_force
+exp_defl = u_defl_disp
+
+# Si cambió el sistema de unidades, resetear apoyos a configuración por defecto
+if chosen_system != prev_system:
+    st.session_state.prev_unit_system = chosen_system
+    # Resetear apoyos a valores seguros en SI
+    if "apoyos" in st.session_state:
+        st.session_state.pop("apoyos")  # Forzar reinicio
+    reset_resultados()
 
 with st.sidebar:
     st.header("Propiedades de la viga")
@@ -341,6 +361,23 @@ with st.sidebar:
             "Carga trapezoidal",
         ],
     )
+    
+    # Ayuda sobre convención de signos para momentos
+    if tipo == "Momento puntual":
+        with st.expander("ℹ️ Convención de signos del momento"):
+            st.markdown("""
+            **Momento Antihorario ↺ (Positivo):**
+            - Gira en sentido contrario a las manecillas del reloj
+            - Levanta el lado derecho de la viga
+            - Introduce salto **positivo** en el diagrama M(x)
+            
+            **Momento Horario ↻ (Negativo):**
+            - Gira en sentido de las manecillas del reloj
+            - Baja el lado derecho de la viga
+            - Introduce salto **negativo** en el diagrama M(x)
+            
+            💡 **Recordatorio:** Un momento puntual NO cambia el cortante V(x)
+            """)
 
     if "cargas" not in st.session_state:
         st.session_state.cargas = []
@@ -358,14 +395,31 @@ with st.sidebar:
         P = st.session_state.P_si
         a = st.session_state.a_si
     elif tipo == "Momento puntual":
-        M_input = st.number_input(label_with_unit("M", f"{u_force}·{u_len}"), value=1000.0, step=100.0, key='M_input')
+        M_input = st.number_input(label_with_unit("Magnitud |M|", f"{u_force}·{u_len}"), 
+                                  value=1000.0, step=100.0, min_value=0.0, key='M_input',
+                                  help="Magnitud del momento (siempre positiva)")
+        
+        # Selector de dirección del momento
+        direccion_momento = st.radio(
+            "Dirección del momento",
+            options=["Antihorario ↺ (positivo)", "Horario ↻ (negativo)"],
+            index=0,
+            key='direccion_momento',
+            help="Antihorario ↺ levanta el lado derecho | Horario ↻ baja el lado derecho"
+        )
+        
         aM_input = st.number_input(label_with_unit("Posición a", u_len), min_value=0.0, max_value=L_input,
                                    value=st.session_state.a_si / LENGTH_UNITS[u_len], step=0.1, key='aM_input')
+        
         en_apoyo = (abs(aM_input - 0.0) < 1e-12) or (abs(aM_input - L_input) < 1e-12)
         en_vano_flag = True
         if en_apoyo:
-            en_vano_flag = st.checkbox("Aplicar salto dentro del vano si está en apoyo", value=True, help="Si desmarcas, el momento en apoyo no introduce salto en M(x) dentro del vano (solo afecta reacciones).")
-        M = M_input * FORCE_UNITS[u_force] * LENGTH_UNITS[u_len]
+            en_vano_flag = st.checkbox("Aplicar salto dentro del vano si está en apoyo", value=True, 
+                                      help="Si desmarcas, el momento en apoyo no introduce salto en M(x) dentro del vano (solo afecta reacciones).")
+        
+        # Aplicar signo según la dirección
+        signo = 1.0 if "Antihorario" in direccion_momento else -1.0
+        M = signo * M_input * FORCE_UNITS[u_force] * LENGTH_UNITS[u_len]
         aM = aM_input * LENGTH_UNITS[u_len]
     else:
         inicio_input = st.number_input(label_with_unit("Inicio", u_len), min_value=0.0, max_value=L_input,
@@ -421,7 +475,10 @@ with st.sidebar:
 
     with st.expander("⚙️ Opciones avanzadas"):
         exportar = st.checkbox("Exportar resultados al calcular", value=True)
-        num_puntos = st.slider("Resolución (n puntos)", min_value=100, max_value=1200, value=400, step=100)
+        num_puntos = st.slider("Resolución uniforme (n puntos)", min_value=100, max_value=2000, value=400, step=100)
+        usar_eventos = st.checkbox("Muestreo por eventos (captura saltos en V y M)", value=True,
+                                   help="Construye una malla concentrada en apoyos, cargas puntuales, inicios/fines de tramos y momentos puntuales")
+        puntos_por_tramo = st.slider("Puntos por tramo (si eventos)", min_value=10, max_value=200, value=40, step=10)
         auto_recalc = st.checkbox("Recalcular automáticamente al editar cargas", value=True)
         # Modo debug simbólico deshabilitado (forzado a False)
         debug_mode = False
@@ -466,9 +523,26 @@ def plot_q(ax, cargas, L, E, I, u_len, u_w, u_force, apoyos=None):
                        ha='center', va='top', fontsize=8, color='crimson')
             elif isinstance(c, CargaMomento):
                 xpos = c.posicion / LENGTH_UNITS[u_len]
-                # Símbolo de momento como arco circular
-                ax.scatter([xpos], [0], color="purple", marker="o", s=80, zorder=5, edgecolors='white', linewidths=1)
-                ax.text(xpos, 0, f"  M", ha='left', va='center', fontsize=9, color='purple', weight='bold')
+                M_valor = c.magnitud / (FORCE_UNITS[u_force] * LENGTH_UNITS[u_len])
+                
+                # Determinar dirección y símbolo
+                if c.magnitud > 0:
+                    # Antihorario ↺
+                    color = "purple"
+                    symbol = "↺"
+                    label = f"M={abs(M_valor):.1f}{symbol}"
+                else:
+                    # Horario ↻
+                    color = "darkorange"
+                    symbol = "↻"
+                    label = f"M={abs(M_valor):.1f}{symbol}"
+                
+                # Dibujar círculo con flecha indicando dirección
+                ax.scatter([xpos], [0], color=color, marker="o", s=120, zorder=5, 
+                          edgecolors='white', linewidths=2)
+                ax.text(xpos, 0.05, label, ha='center', va='bottom', 
+                       fontsize=9, color=color, weight='bold',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8, edgecolor=color))
         
         # Dibujar apoyos como triángulos verdes con etiquetas
         for apoyo in v_tmp.apoyos:
@@ -529,8 +603,10 @@ with tabs[0]:
         if isinstance(carga, CargaPuntual):
             return f"P={carga.magnitud/ FORCE_UNITS[u_force]:.3g} {u_force} @ x={carga.posicion/ LENGTH_UNITS[u_len]:.3g} {u_len}"
         if isinstance(carga, CargaMomento):
+            M_valor = carga.magnitud / (FORCE_UNITS[u_force] * LENGTH_UNITS[u_len])
+            direccion = "↺ Antihorario" if carga.magnitud > 0 else "↻ Horario"
             extra = " (vano)" if getattr(carga, "en_vano", True) else " (apoyo)"
-            return (f"M={carga.magnitud/(FORCE_UNITS[u_force]*LENGTH_UNITS[u_len]):.3g} {u_force}·{u_len} @ x={carga.posicion/ LENGTH_UNITS[u_len]:.3g} {u_len}{extra}")
+            return (f"M={abs(M_valor):.3g} {u_force}·{u_len} {direccion} @ x={carga.posicion/ LENGTH_UNITS[u_len]:.3g} {u_len}{extra}")
         if isinstance(carga, CargaUniforme):
             return (f"w={carga.intensidad/ DIST_LOAD_UNITS[u_w]:.3g} {u_w} entre "
                     f"{carga.inicio/ LENGTH_UNITS[u_len]:.3g}-{carga.fin/ LENGTH_UNITS[u_len]:.3g} {u_len}")
@@ -575,12 +651,46 @@ with tabs[0]:
                     newP = st.number_input("Nueva P", value=float(carga_ed.magnitud))
                     newA = st.number_input("Nueva posición", value=float(carga_ed.posicion), min_value=0.0, max_value=float(L))
                 elif isinstance(carga_ed, CargaMomento):
-                    newM = st.number_input("Nuevo M", value=float(carga_ed.magnitud))
-                    newA = st.number_input("Nueva posición", value=float(carga_ed.posicion), min_value=0.0, max_value=float(L))
-                    en_apoyo_ed = (abs(newA - 0.0) < 1e-12) or (abs(newA - float(L)) < 1e-12)
+                    # Mostrar magnitud absoluta y dirección separadamente
+                    M_abs = abs(carga_ed.magnitud)
+                    M_display_units = M_abs / (FORCE_UNITS[u_force] * LENGTH_UNITS[u_len])
+                    
+                    newM_abs = st.number_input(
+                        f"Nueva magnitud |M| ({u_force}·{u_len})", 
+                        value=float(M_display_units), 
+                        min_value=0.0,
+                        step=max(0.1, float(M_display_units) * 0.1)
+                    )
+                    
+                    # Selector de dirección
+                    direccion_actual = 0 if carga_ed.magnitud > 0 else 1
+                    nueva_direccion = st.radio(
+                        "Dirección del momento",
+                        options=["Antihorario ↺ (positivo)", "Horario ↻ (negativo)"],
+                        index=direccion_actual,
+                        key=f"dir_ed_{ed}"
+                    )
+                    
+                    newA = st.number_input(
+                        f"Nueva posición ({u_len})", 
+                        value=float(carga_ed.posicion / LENGTH_UNITS[u_len]), 
+                        min_value=0.0, 
+                        max_value=float(L / LENGTH_UNITS[u_len])
+                    )
+                    
+                    en_apoyo_ed = (abs(newA - 0.0) < 1e-12) or (abs(newA - float(L / LENGTH_UNITS[u_len])) < 1e-12)
                     newEnVano = carga_ed.en_vano
                     if en_apoyo_ed:
-                        newEnVano = st.checkbox("Aplicar salto dentro del vano si está en apoyo", value=bool(carga_ed.en_vano), key=f"en_vano_ed_{ed}")
+                        newEnVano = st.checkbox(
+                            "Aplicar salto dentro del vano si está en apoyo", 
+                            value=bool(carga_ed.en_vano), 
+                            key=f"en_vano_ed_{ed}"
+                        )
+                    
+                    # Convertir a SI con signo
+                    signo_ed = 1.0 if "Antihorario" in nueva_direccion else -1.0
+                    newM = signo_ed * newM_abs * FORCE_UNITS[u_force] * LENGTH_UNITS[u_len]
+                    newA_si = newA * LENGTH_UNITS[u_len]
                 elif isinstance(carga_ed, CargaUniforme):
                     newP = st.number_input("Nueva w", value=float(carga_ed.intensidad))
                     newIni = st.number_input("Nuevo inicio", value=float(carga_ed.inicio), min_value=0.0, max_value=float(L))
@@ -602,7 +712,7 @@ with tabs[0]:
                             carga_ed.posicion = newA
                         elif isinstance(carga_ed, CargaMomento):
                             carga_ed.magnitud = newM
-                            carga_ed.posicion = newA
+                            carga_ed.posicion = newA_si
                             carga_ed.en_vano = newEnVano
                         elif isinstance(carga_ed, CargaUniforme):
                             carga_ed.intensidad = newP
@@ -662,7 +772,10 @@ with tabs[0]:
                         viga.agregar_carga(c)
                     
                     with st.spinner('Calculando reacciones y diagramas...'):
-                        df = generar_dataframe(viga, num_puntos=num_puntos)
+                        if usar_eventos:
+                            df = generar_dataframe_eventos(viga, puntos_por_tramo=puntos_por_tramo)
+                        else:
+                            df = generar_dataframe(viga, num_puntos=num_puntos)
                         st.session_state.last_df_si = df
                         maximos = obtener_maximos(df)
                         reacciones = viga.calcular_reacciones()
@@ -711,8 +824,8 @@ with tabs[1]:
             col_val2.metric("Grado", validacion.get('grado', 0))
             col_val3.metric("N° Apoyos", len(data.get('apoyos', [])))
         
-        # Siempre mostrar en las unidades de exportación seleccionadas
-        disp_len, disp_force, disp_defl = exp_len, exp_force, exp_defl
+        # Unidades de visualización basadas en el sistema elegido
+        disp_len, disp_force, disp_defl = u_len, u_force, u_defl_disp
         # DataFrame convertido para visualización (copia)
         df_disp = convertir_dataframe_export(df, disp_len, disp_force, disp_defl)
 
@@ -765,30 +878,123 @@ with tabs[1]:
                                         u_len, u_w, u_force, data.get('apoyos'), reacciones)
             st.pyplot(fig1)
         with gtab[1]:
+            # Opciones de visualización de signos
+            col_opts_v, col_opts_m = st.columns(2)
+            with col_opts_v:
+                invert_v = st.checkbox("Invertir signo del cortante", value=False, help="Cambia la convención de signo mostrada para V(x)")
+            with col_opts_m:
+                invert_m = st.checkbox("Invertir signo del momento (lado comprimido bajo)", value=True, help="Si está activado, se dibuja M con signo invertido para mostrar el lado comprimido hacia abajo")
+
+            # Usar DataFrame ya convertido a unidades de visualización para coherencia
+            x_plot_base = df_disp["x"].to_numpy()
+            V_plot = df_disp["cortante"].to_numpy()
+            M_plot = df_disp["momento"].to_numpy()
+
+            # Construir pasos verticales en apoyos (V) y en momentos puntuales (M)
+            def insertar_paso_vertical(x_arr, y_arr, x0, delta_y):
+                if len(x_arr) == 0:
+                    return x_arr, y_arr
+                import numpy as _np
+                idx = int(_np.argmin(_np.abs(x_arr - x0)))
+                # Si el punto exacto no existe (por redondeo), no insertamos
+                if _np.abs(x_arr[idx] - x0) > 1e-9:
+                    return x_arr, y_arr
+                x_new = _np.insert(x_arr, idx+1, x_arr[idx])
+                y_new = _np.insert(y_arr, idx+1, y_arr[idx] + delta_y)
+                return x_new, y_new
+
+            # Trabajar con copias separadas de x para V y M, evitando desalineaciones
+            x_plot_V = x_plot_base.copy()
+            x_plot_M = x_plot_base.copy()
+
+            # Insertar pasos de cortante en cada apoyo con su reacción (en unidades mostradas)
+            for ap in data.get('apoyos', []):
+                if ap.nombre in reacciones:
+                    R_disp = reacciones[ap.nombre] / FORCE_UNITS[disp_force]
+                    x_plot_V, V_plot = insertar_paso_vertical(x_plot_V, V_plot, ap.posicion / LENGTH_UNITS[disp_len], R_disp)
+
+            # Insertar pasos de momento en momentos puntuales
+            for c in data.get('cargas', []):
+                if isinstance(c, CargaMomento):
+                    # Si momento en apoyo y en_vano=False, no dibujar salto dentro del vano
+                    en_apoyo = any(abs(c.posicion - ap.posicion) < 1e-12 for ap in data.get('apoyos', []))
+                    if en_apoyo and (not getattr(c, 'en_vano', True)):
+                        continue
+                    M_disp = c.magnitud / (FORCE_UNITS[disp_force] * LENGTH_UNITS[disp_len])
+                    x_plot_M, M_plot = insertar_paso_vertical(x_plot_M, M_plot, c.posicion / LENGTH_UNITS[disp_len], M_disp)
+            if invert_v:
+                V_plot = -V_plot
+            if invert_m:
+                M_plot = -M_plot
+
             fig2, (axv, axm) = plt.subplots(2,1, figsize=(8,6), sharex=True)
-            axv.plot(df["x"] / LENGTH_UNITS[disp_len], df["cortante"] / FORCE_UNITS[disp_force], 
-                    color="#ff7f0e", linewidth=2)
+            axv.plot(x_plot_V, V_plot, color="#ff7f0e", linewidth=2)
             axv.set_ylabel(f"V [{disp_force}]", fontsize=11)
             axv.grid(alpha=0.3, linestyle='--')
             axv.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
             # Agregar apoyos en diagrama de cortante
             plot_apoyos_en_diagrama(axv, data.get('apoyos', []), disp_len, y_pos=0)
+            # Marcar saltos de V en apoyos y cargas puntuales
+            try:
+                vtmp = Viga(data['L'], data['E'], data['I'], apoyos=list(data.get('apoyos', [])))
+                for c in data.get('cargas', []):
+                    vtmp.agregar_carga(c)
+                ev = get_event_positions(vtmp)
+                xs_jump_v = np.concatenate([ev['apoyos'], ev['puntuales']]) if (ev['apoyos'].size + ev['puntuales'].size) > 0 else np.array([])
+                for xj in xs_jump_v:
+                    axv.axvline(x=xj / LENGTH_UNITS[disp_len], color='red', linestyle=':', linewidth=0.8, alpha=0.5)
+            except Exception:
+                pass
             
-            axm.plot(df["x"] / LENGTH_UNITS[disp_len], -df["momento"] / (FORCE_UNITS[disp_force]*LENGTH_UNITS[disp_len]), 
-                    color="#2ca02c", linewidth=2)
-            axm.set_ylabel(f"M [{disp_force}·{disp_len}] (dibujado en lado comprimido)", fontsize=11)
+            axm.plot(x_plot_M, M_plot, color="#2ca02c", linewidth=2)
+            axm.set_ylabel(f"M [{disp_force}·{disp_len}]", fontsize=11)
             axm.set_xlabel(f"x [{disp_len}]", fontsize=11)
             axm.grid(alpha=0.3, linestyle='--')
             axm.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
             # Agregar apoyos en diagrama de momento
             plot_apoyos_en_diagrama(axm, data.get('apoyos', []), disp_len, y_pos=0)
+            # Marcar saltos de M en momentos puntuales
+            try:
+                if 'ev' not in locals():
+                    vtmp = Viga(data['L'], data['E'], data['I'], apoyos=list(data.get('apoyos', [])))
+                    for c in data.get('cargas', []):
+                        vtmp.agregar_carga(c)
+                    ev = get_event_positions(vtmp)
+                
+                # Marcar posiciones de momentos puntuales con anotaciones
+                for c in data.get('cargas', []):
+                    if isinstance(c, CargaMomento):
+                        xj = c.posicion / LENGTH_UNITS[disp_len]
+                        M_val = c.magnitud / (FORCE_UNITS[disp_force] * LENGTH_UNITS[disp_len])
+                        
+                        # Línea vertical en la posición
+                        color_momento = 'purple' if c.magnitud > 0 else 'darkorange'
+                        axm.axvline(x=xj, color=color_momento, linestyle=':', linewidth=1.2, alpha=0.6)
+                        
+                        # Anotación con dirección
+                        direccion_sym = "↺" if c.magnitud > 0 else "↻"
+                        ylim_m = axm.get_ylim()
+                        y_ann = ylim_m[1] * 0.9
+                        axm.annotate(
+                            f'{direccion_sym}M={abs(M_val):.1f}',
+                            xy=(xj, 0),
+                            xytext=(xj, y_ann),
+                            fontsize=8,
+                            color=color_momento,
+                            weight='bold',
+                            ha='center',
+                            bbox=dict(boxstyle='round,pad=0.4', facecolor='white', 
+                                    edgecolor=color_momento, alpha=0.8)
+                        )
+            except Exception:
+                pass
             
             fig2.tight_layout()
             st.pyplot(fig2)
         with gtab[2]:
             fig3, ax3 = plt.subplots(figsize=(8,3))
-            ax3.plot(df["x"] / LENGTH_UNITS[disp_len], df["deflexion"] / DEFLEXION_DISPLAY[disp_defl], 
-                    color="#9467bd", linewidth=2)
+            # Deflexión también desde DataFrame convertido
+            ax3.plot(df_disp["x"], df_disp["deflexion"], color="#9467bd", linewidth=2)
             ax3.set_ylabel(f"y [{disp_defl}]", fontsize=11)
             ax3.set_xlabel(f"x [{disp_len}]", fontsize=11)
             ax3.grid(alpha=0.3, linestyle='--')
@@ -820,7 +1026,7 @@ with tabs[1]:
                 st.success(f"Configuración exportada en {ruta_cfg}")
             except Exception as e:
                 st.error(f"No se pudo exportar configuración: {e}")
-        st.caption("Mostrando tabla, métricas y diagramas en unidades de exportación. Cambia las unidades en el panel lateral para actualizar.")
+        st.caption("Mostrando tabla, métricas y diagramas en las unidades del sistema seleccionado. Cambia el sistema en el panel lateral para actualizar.")
 
         try:
             w_uniforme_dom = None
