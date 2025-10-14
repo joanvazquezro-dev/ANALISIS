@@ -23,6 +23,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import sympy as sp
 
 # Compatibilidad con versiones de Streamlit
 if not hasattr(st, "experimental_rerun"):
@@ -49,6 +50,7 @@ from backend.viga import (
     CargaTriangular,
     CargaTrapezoidal,
     CargaMomento,
+    x as x_sym,
 )
 from backend.calculos import (
     generar_dataframe,
@@ -475,17 +477,18 @@ with st.sidebar:
 
     with st.expander("⚙️ Opciones avanzadas"):
         exportar = st.checkbox("Exportar resultados al calcular", value=True)
-        num_puntos = st.slider("Resolución uniforme (n puntos)", min_value=100, max_value=2000, value=400, step=100)
-        usar_eventos = st.checkbox("Muestreo por eventos (captura saltos en V y M)", value=True,
-                                   help="Construye una malla concentrada en apoyos, cargas puntuales, inicios/fines de tramos y momentos puntuales")
-        puntos_por_tramo = st.slider("Puntos por tramo (si eventos)", min_value=10, max_value=200, value=40, step=10)
+        puntos_por_tramo = st.slider(
+            "Puntos por tramo (muestreo por eventos)",
+            min_value=10, max_value=200, value=40, step=10,
+            help="Número de puntos equiespaciados entre eventos (apoyos, inicios/fines de cargas y cargas puntuales/momentos)."
+        )
         auto_recalc = st.checkbox("Recalcular automáticamente al editar cargas", value=True)
         # Modo debug simbólico deshabilitado (forzado a False)
         debug_mode = False
         if st.button("♻️ Forzar recalcular ahora"):
             reset_resultados()
             st.experimental_rerun()
-        st.caption("Mayor resolución = más precisión pero más tiempo de cálculo.")
+        st.caption("El muestreo por eventos está siempre habilitado; aumentar los puntos por tramo mejora la resolución entre eventos.")
     do_calc = st.button("🔄 Calcular", type="primary")
 
 # ----------------- Tabs principales -----------------
@@ -559,7 +562,8 @@ def plot_q(ax, cargas, L, E, I, u_len, u_w, u_force, apoyos=None):
     ax.set_ylabel(f"q [{u_w}]", fontsize=10)
     ax.grid(alpha=0.3, linestyle='--')
     ax.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
-    ax.set_xlim(-0.05*L/LENGTH_UNITS[u_len], 1.05*L/LENGTH_UNITS[u_len])
+    # Limitar el eje x exactamente al dominio de la viga [0, L]
+    ax.set_xlim(0.0, L / LENGTH_UNITS[u_len])
 
 
 def plot_apoyos_en_diagrama(ax, apoyos, u_len, y_pos=0):
@@ -772,10 +776,8 @@ with tabs[0]:
                         viga.agregar_carga(c)
                     
                     with st.spinner('Calculando reacciones y diagramas...'):
-                        if usar_eventos:
-                            df = generar_dataframe_eventos(viga, puntos_por_tramo=puntos_por_tramo)
-                        else:
-                            df = generar_dataframe(viga, num_puntos=num_puntos)
+                        # Siempre usar muestreo por eventos para capturar saltos de V y M
+                        df = generar_dataframe_eventos(viga, puntos_por_tramo=puntos_por_tramo)
                         st.session_state.last_df_si = df
                         maximos = obtener_maximos(df)
                         reacciones = viga.calcular_reacciones()
@@ -883,58 +885,40 @@ with tabs[1]:
             with col_opts_v:
                 invert_v = st.checkbox("Invertir signo del cortante", value=False, help="Cambia la convención de signo mostrada para V(x)")
             with col_opts_m:
-                invert_m = st.checkbox("Invertir signo del momento (lado comprimido bajo)", value=True, help="Si está activado, se dibuja M con signo invertido para mostrar el lado comprimido hacia abajo")
+                invert_m = st.checkbox("Invertir signo del momento (solo visual)", value=False, help="Por defecto se usa la convención interna del solver (M' = V). Actívalo solo si prefieres la convención alternativa de dibujo")
+
+            st.caption("Convención interna (por defecto en gráficos): cargas hacia abajo positivas; V' = −q(x); M' = V")
 
             # Usar DataFrame ya convertido a unidades de visualización para coherencia
-            x_plot_base = df_disp["x"].to_numpy()
+            x_plot = df_disp["x"].to_numpy()
             V_plot = df_disp["cortante"].to_numpy()
             M_plot = df_disp["momento"].to_numpy()
 
-            # Construir pasos verticales en apoyos (V) y en momentos puntuales (M)
-            def insertar_paso_vertical(x_arr, y_arr, x0, delta_y):
-                if len(x_arr) == 0:
-                    return x_arr, y_arr
-                import numpy as _np
-                idx = int(_np.argmin(_np.abs(x_arr - x0)))
-                # Si el punto exacto no existe (por redondeo), no insertamos
-                if _np.abs(x_arr[idx] - x0) > 1e-9:
-                    return x_arr, y_arr
-                x_new = _np.insert(x_arr, idx+1, x_arr[idx])
-                y_new = _np.insert(y_arr, idx+1, y_arr[idx] + delta_y)
-                return x_new, y_new
-
-            # Trabajar con copias separadas de x para V y M, evitando desalineaciones
-            x_plot_V = x_plot_base.copy()
-            x_plot_M = x_plot_base.copy()
-
-            # Insertar pasos de cortante en cada apoyo con su reacción (en unidades mostradas)
-            for ap in data.get('apoyos', []):
-                if ap.nombre in reacciones:
-                    R_disp = reacciones[ap.nombre] / FORCE_UNITS[disp_force]
-                    x_plot_V, V_plot = insertar_paso_vertical(x_plot_V, V_plot, ap.posicion / LENGTH_UNITS[disp_len], R_disp)
-
-            # Insertar pasos de momento en momentos puntuales
-            for c in data.get('cargas', []):
-                if isinstance(c, CargaMomento):
-                    # Si momento en apoyo y en_vano=False, no dibujar salto dentro del vano
-                    en_apoyo = any(abs(c.posicion - ap.posicion) < 1e-12 for ap in data.get('apoyos', []))
-                    if en_apoyo and (not getattr(c, 'en_vano', True)):
-                        continue
-                    M_disp = c.magnitud / (FORCE_UNITS[disp_force] * LENGTH_UNITS[disp_len])
-                    x_plot_M, M_plot = insertar_paso_vertical(x_plot_M, M_plot, c.posicion / LENGTH_UNITS[disp_len], M_disp)
+            # CONVENCIÓN: El diagrama de momento SIEMPRE se muestra invertido
+            # (valores positivos hacia abajo, como es convencional en ingeniería)
+            M_plot = -M_plot  # Invertir siempre
+            
+            # Aplicar inversión de signo a cortante si está activada
             if invert_v:
                 V_plot = -V_plot
+            # La opción invert_m ahora invierte la inversión (vuelve a positivo arriba)
             if invert_m:
-                M_plot = -M_plot
+                M_plot = -M_plot  # Doble inversión = vuelve a positivo arriba
 
             fig2, (axv, axm) = plt.subplots(2,1, figsize=(8,6), sharex=True)
-            axv.plot(x_plot_V, V_plot, color="#ff7f0e", linewidth=2)
+            
+            # Graficar cortante
+            axv.plot(x_plot, V_plot, color="#ff7f0e", linewidth=2)
             axv.set_ylabel(f"V [{disp_force}]", fontsize=11)
             axv.grid(alpha=0.3, linestyle='--')
             axv.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+            # Limitar eje x al dominio de la viga
+            axv.set_xlim(0.0, data['L'] / LENGTH_UNITS[disp_len])
+            
             # Agregar apoyos en diagrama de cortante
             plot_apoyos_en_diagrama(axv, data.get('apoyos', []), disp_len, y_pos=0)
-            # Marcar saltos de V en apoyos y cargas puntuales
+            
+            # Marcar líneas verticales en discontinuidades de V (apoyos y cargas puntuales)
             try:
                 vtmp = Viga(data['L'], data['E'], data['I'], apoyos=list(data.get('apoyos', [])))
                 for c in data.get('cargas', []):
@@ -946,11 +930,15 @@ with tabs[1]:
             except Exception:
                 pass
             
-            axm.plot(x_plot_M, M_plot, color="#2ca02c", linewidth=2)
+            # Graficar momento
+            axm.plot(x_plot, M_plot, color="#2ca02c", linewidth=2)
             axm.set_ylabel(f"M [{disp_force}·{disp_len}]", fontsize=11)
             axm.set_xlabel(f"x [{disp_len}]", fontsize=11)
             axm.grid(alpha=0.3, linestyle='--')
             axm.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+            # Limitar eje x al dominio de la viga
+            axm.set_xlim(0.0, data['L'] / LENGTH_UNITS[disp_len])
+            
             # Agregar apoyos en diagrama de momento
             plot_apoyos_en_diagrama(axm, data.get('apoyos', []), disp_len, y_pos=0)
             # Marcar saltos de M en momentos puntuales
@@ -1001,6 +989,8 @@ with tabs[1]:
             ax3.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
             # Agregar apoyos en diagrama de deflexión
             plot_apoyos_en_diagrama(ax3, data.get('apoyos', []), disp_len, y_pos=0)
+            # Limitar eje x al dominio de la viga
+            ax3.set_xlim(0.0, data['L'] / LENGTH_UNITS[disp_len])
             fig3.tight_layout()
             st.pyplot(fig3)
 
@@ -1070,13 +1060,14 @@ with tabs[2]:
                 viga_total = Viga(L, E, I, apoyos=list(apoyos_actuales))
                 for c in st.session_state.cargas:
                     viga_total.agregar_carga(c)
-                df_total = generar_dataframe(viga_total, num_puntos=400)
+                # Usar muestreo por eventos para la verificación también
+                df_total = generar_dataframe_eventos(viga_total, puntos_por_tramo=40)
                 xs = df_total["x"].to_numpy()
                 acumulado = pd.DataFrame({"x": xs, "cortante": 0.0, "momento": 0.0, "pendiente": 0.0, "deflexion": 0.0})
                 for c in st.session_state.cargas:
                     v_tmp = Viga(L, E, I, apoyos=list(apoyos_actuales))
                     v_tmp.agregar_carga(c)
-                    df_i = generar_dataframe(v_tmp, num_puntos=len(xs))
+                    df_i = generar_dataframe_eventos(v_tmp, puntos_por_tramo=40)
                     if not np.allclose(df_i["x"].to_numpy(), xs):
                         for col in ["cortante", "momento", "pendiente", "deflexion"]:
                             df_i[col] = np.interp(xs, df_i["x"], df_i[col])
@@ -1116,9 +1107,61 @@ with tabs[2]:
                 for ax, lab in zip(axs, [f"ΔV [{u_force}]", f"ΔM [{u_force}·{u_len}]", f"Δy [{u_defl_disp}]"]):
                     ax.set_ylabel(lab)
                     ax.grid(alpha=0.3)
+                    # Limitar eje x al dominio de la viga
+                    ax.set_xlim(0.0, L / LENGTH_UNITS[u_len])
                 axs[-1].set_xlabel(f"x [{u_len}]")
                 figd.suptitle("Diferencias (total - suma)")
                 st.pyplot(figd)
+
+                # Verificación adicional: derivadas M' ≈ V y V' ≈ -q(x)
+                try:
+                    V_vals = df_total["cortante"].to_numpy()
+                    M_vals = df_total["momento"].to_numpy()
+                    dMdx = np.gradient(M_vals, xs)
+                    dVdx = np.gradient(V_vals, xs)
+
+                    # q(x) sobre el mismo mallado xs
+                    q_expr = viga_total.intensidad_total()
+                    q_func = sp.lambdify(x_sym, q_expr, "numpy")
+                    q_vals = np.asarray(q_func(xs), dtype=float)
+
+                    # Construir máscara para ignorar puntos con discontinuidades
+                    ev = get_event_positions(viga_total)
+                    eventos = np.concatenate([
+                        ev.get('apoyos', np.array([])),
+                        ev.get('puntuales', np.array([])),
+                        ev.get('momentos', np.array([]))
+                    ]) if True else np.array([])
+                    mask = np.ones_like(xs, dtype=bool)
+                    if xs.size > 1 and eventos.size > 0:
+                        dx = float(np.median(np.diff(xs)))
+                        for a in eventos:
+                            mask &= (np.abs(xs - a) > dx)
+
+                    # Errores en derivadas (en SI)
+                    err_Mprime = np.max(np.abs(dMdx[mask] - V_vals[mask])) if np.any(mask) else float('nan')
+                    err_Vprime = np.max(np.abs(dVdx[mask] + q_vals[mask])) if np.any(mask) else float('nan')
+                    # Errores relativos normalizados por magnitud típica
+                    denom_M = max(np.max(np.abs(V_vals[mask])) if np.any(mask) else 1.0, 1e-12)
+                    denom_V = max(np.max(np.abs(q_vals[mask])) if np.any(mask) else 1.0, 1e-12)
+                    rel_Mprime = float(err_Mprime / denom_M) if denom_M > 0 else float('nan')
+                    rel_Vprime = float(err_Vprime / denom_V) if denom_V > 0 else float('nan')
+
+                    with st.expander("✅ Verificación de derivadas (convención interna)", expanded=False):
+                        st.write({
+                            "max_error_abs_Mprime_equals_V": err_Mprime,
+                            "max_error_rel_Mprime_equals_V": rel_Mprime,
+                            "max_error_abs_Vprime_equals_-q": err_Vprime,
+                            "max_error_rel_Vprime_equals_-q": rel_Vprime,
+                        })
+                        tol_rel = 5e-2  # 5% relativo como guía general fuera de discontinuidades
+                        if np.isfinite(rel_Mprime) and rel_Mprime <= tol_rel and np.isfinite(rel_Vprime) and rel_Vprime <= tol_rel:
+                            st.success("Las relaciones M' = V y V' = −q(x) se verifican numéricamente (ignorando puntos de discontinuidad)")
+                        else:
+                            st.warning("Se observan discrepancias notables en las verificaciones de derivadas. Revisa la malla y las posiciones de eventos/cargas.")
+                except Exception as _:
+                    # Silencioso: esta verificación es auxiliar
+                    pass
             except Exception as e:
                 st.error(f"Error en verificación: {e}")
 

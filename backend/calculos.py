@@ -119,9 +119,15 @@ def comparar_simbolico_numerico(viga: Viga, num_puntos: int = 400) -> pd.DataFra
     deflexion_num = cumulative_trapezoid(pendiente_num, x_vals, initial=0.0)
 
     # Ajuste lineal para cumplir condiciones de borde y(0)=y(L)=0
+    # CORRECCIÓN: Solo aplicar si realmente no se cumplen las condiciones (error > 1%)
     if len(x_vals) > 1:
         L = x_vals[-1]
-        deflexion_num -= (x_vals / L) * deflexion_num[-1]
+        y_max = np.max(np.abs(deflexion_num))
+        umbral_error = 0.01 * y_max if y_max > 1e-9 else 1e-9
+        
+        # Verificar si necesitamos ajustar (si y(L) no es aproximadamente 0)
+        if abs(deflexion_num[-1]) > umbral_error:
+            deflexion_num -= (x_vals / L) * deflexion_num[-1]
 
     resultados = pd.DataFrame({
         "x": x_vals,
@@ -272,6 +278,7 @@ def evaluar_con_malla(viga: Viga, x_grid: np.ndarray) -> Dict[str, np.ndarray]:
     M_vals = cumulative_trapezoid(V_vals, x_grid, initial=0.0)
 
     # Añadir saltos de momentos puntuales
+    # CORRECCIÓN: Aplicar salto directo (suma M0 donde x > a) en lugar de multiplicar por escalón
     if any(c.__class__.__name__ == 'CargaMomento' for c in viga.cargas):
         L = float(viga.longitud)
         tol = max(1e-12, 1e-9 * L)
@@ -284,11 +291,15 @@ def evaluar_con_malla(viga: Viga, x_grid: np.ndarray) -> Dict[str, np.ndarray]:
             en_vano = bool(getattr(c, 'en_vano', True))
             if esta_en_apoyo and not en_vano:
                 continue
-            step = np.zeros_like(x_grid, dtype=float)
-            step[x_grid < (a - tol)] = 0.0
-            step[np.abs(x_grid - a) <= tol] = 0.5
-            step[x_grid > (a + tol)] = 1.0
-            M_vals = M_vals + float(getattr(c, 'magnitud')) * step
+            
+            # Salto directo: sumar M0 donde x > a (implementación correcta de Heaviside)
+            magnitud = float(getattr(c, 'magnitud'))
+            M_vals[x_grid > (a + tol)] += magnitud
+            
+            # En x = a, sumar M0/2 (convención Heaviside con H(0)=1/2)
+            idx_at_a = np.argmin(np.abs(x_grid - a))
+            if abs(x_grid[idx_at_a] - a) < tol:
+                M_vals[idx_at_a] += magnitud * 0.5
 
     # θ y y
     EI = float(viga.E * viga.I)
@@ -296,6 +307,8 @@ def evaluar_con_malla(viga: Viga, x_grid: np.ndarray) -> Dict[str, np.ndarray]:
     y_vals = cumulative_trapezoid(theta_vals, x_grid, initial=0.0)
 
     # Ajuste de condiciones de borde en apoyos
+    # Ahora que aplicamos saltos de momentos puntuales ANTES de esta corrección,
+    # es seguro aplicar siempre (solo evitamos si el error es despreciable < 1e-9)
     if len(viga.apoyos) >= 2:
         a1 = float(viga.apoyos[0].posicion)
         a2 = float(viga.apoyos[1].posicion)
@@ -303,13 +316,16 @@ def evaluar_con_malla(viga: Viga, x_grid: np.ndarray) -> Dict[str, np.ndarray]:
         i2 = int(np.argmin(np.abs(x_grid - a2)))
         x1, x2 = x_grid[i1], x_grid[i2]
         y1, y2 = y_vals[i1], y_vals[i2]
-        if abs(x2 - x1) > 1e-15:
+        
+        # Aplicar corrección si hay cualquier error medible
+        if (abs(y1) > 1e-9 or abs(y2) > 1e-9) and abs(x2 - x1) > 1e-15:
             m = (y2 - y1) / (x2 - x1)
             y_vals = y_vals - (y1 + m * (x_grid - x1))
     elif len(viga.apoyos) == 1:
         a = float(viga.apoyos[0].posicion)
         i0 = int(np.argmin(np.abs(x_grid - a)))
-        y_vals = y_vals - y_vals[i0]
+        if abs(y_vals[i0]) > 1e-9:
+            y_vals = y_vals - y_vals[i0]
 
     return {
         'x': x_grid,
@@ -322,11 +338,28 @@ def evaluar_con_malla(viga: Viga, x_grid: np.ndarray) -> Dict[str, np.ndarray]:
 
 def generar_dataframe_eventos(viga: Viga, puntos_por_tramo: int = 40) -> pd.DataFrame:
     """
-    Genera DataFrame usando muestreo por eventos para capturar saltos nítidos
-    en V(x) y M(x).
+    Genera DataFrame usando el nuevo método de integración por sub-tramos.
+    
+    ACTUALIZADO (Oct 2025): Ahora usa viga.evaluar() que implementa
+    integración robusta por sub-tramos con nudos.
+    
+    Parameters
+    ----------
+    viga : Viga
+        Objeto viga configurado con apoyos y cargas
+    puntos_por_tramo : int
+        Número de puntos por sub-tramo (default: 40)
+    
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame con columnas: x, cortante, momento, pendiente, deflexion
     """
-    x_grid = muestreo_eventos(viga, puntos_por_tramo=puntos_por_tramo)
-    datos = evaluar_con_malla(viga, x_grid)
+    # Usar el nuevo método de integración por sub-tramos
+    # viga.evaluar() automáticamente llama a evaluar_por_subtramos()
+    num_puntos_aprox = puntos_por_tramo * max(2, len(viga.apoyos) + len(viga.cargas))
+    datos = viga.evaluar(num_puntos=num_puntos_aprox)
+    
     df = pd.DataFrame({
         'x': datos['x'],
         'cortante': datos['V'],

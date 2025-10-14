@@ -31,27 +31,27 @@ CONVENCIONES DE SIGNO:
   • Momento concentrado POSITIVO → sentido ANTIHORARIO ↺
   • Momento concentrado NEGATIVO → sentido HORARIO ↻
 
-MÉTODO DE CÁLCULO:
-------------------
+MÉTODO DE CÁLCULO (VERSIÓN 2.0 - OCTUBRE 2025):
+-------------------------------------------------
 1. Reacciones:
    - Isostático (2 apoyos): ΣFy=0, ΣMA=0
    - Hiperestático (3+ apoyos): Método de flexibilidad
 
-2. Cortante V(x):
-   Se construye usando funciones de Heaviside/Macaulay
-   V(x) = RA + Σ(efectos de cargas)
+2. Integración por sub-tramos con nudos (backend/integracion_subtramos.py):
+   a) Identificar nudos críticos: {0, L, apoyos, cargas, cambios de w(x)}
+   b) Para cada nudo: aplicar saltos (V, M)
+   c) Entre nudos: integrar numéricamente V'=-w, M'=V
+   d) Correcciones automáticas para M=0 en apoyos, y=0 en apoyos
+   
+   Ventajas:
+   - Saltos precisos en discontinuidades
+   - Sin valores espurios fuera de [0, L]
+   - Manejo robusto de sistemas hiperestáticos
+   - No requiere integración simbólica compleja
 
-3. Momento M(x):
-   M(x) = ∫ V(ξ)dξ + Σ(saltos por momentos)
-
-4. Deflexión y(x):
-   EI·y'' = M(x)
-   θ(x) = ∫ M/(EI) dx
-   y(x) = ∫ θ dx
-   Con condiciones: y(apoyo_i) = 0
-
-Si la integración simbólica falla, usa método numérico
-(integración trapezoidal) como respaldo.
+3. Fallback numérico:
+   Si falla el método de sub-tramos, usa integración trapezoidal continua
+   con ajustes de condiciones de borde.
 
 HIPÓTESIS DEL MODELO:
 --------------------
@@ -233,9 +233,9 @@ class CargaPuntual(Carga):
     def shear_expression(self, variable: sp.Symbol = x) -> sp.Expr:
         """
         La carga introduce salto negativo en V(x).
-        Usa Heaviside para activar después de x=posicion
+        Usa Heaviside con H(0)=1 para salto completo en la discontinuidad
         """
-        return -self.magnitud * heaviside(variable - self.posicion)
+        return -self.magnitud * sp.Heaviside(variable - self.posicion, 1)
 
     def descripcion(self) -> str:
         return f"Carga puntual P={self.magnitud:.3g} N en x={self.posicion:.3g} m"
@@ -669,6 +669,35 @@ class Viga:
             resultado['mensajes'].append("❌ No hay apoyos definidos")
             return resultado
         
+        # NUEVA VALIDACIÓN: Verificar orden de apoyos
+        posiciones = [ap.posicion for ap in self.apoyos]
+        if posiciones != sorted(posiciones):
+            resultado['advertencias'].append("⚠️ Los apoyos no están ordenados por posición")
+        
+        # NUEVA VALIDACIÓN: Detectar apoyos duplicados (misma posición)
+        for i in range(len(self.apoyos) - 1):
+            dist = self.apoyos[i+1].posicion - self.apoyos[i].posicion
+            if dist < 1e-9:  # Duplicados exactos
+                resultado['valido'] = False
+                resultado['mensajes'].append(
+                    f"❌ Apoyos '{self.apoyos[i].nombre}' y '{self.apoyos[i+1].nombre}' "
+                    f"están en la misma posición ({self.apoyos[i].posicion:.6f} m)"
+                )
+            elif dist < 1e-3:  # Muy cercanos (advertencia)
+                resultado['advertencias'].append(
+                    f"⚠️ Apoyos '{self.apoyos[i].nombre}' y '{self.apoyos[i+1].nombre}' "
+                    f"muy cercanos (d={dist*1000:.2f} mm)"
+                )
+        
+        # NUEVA VALIDACIÓN: Verificar que apoyos intermedios estén dentro del vano
+        if n_apoyos > 2:
+            for apoyo in self.apoyos[1:-1]:  # Apoyos intermedios (no extremos)
+                if apoyo.posicion <= 1e-9 or apoyo.posicion >= (self.longitud - 1e-9):
+                    resultado['advertencias'].append(
+                        f"⚠️ Apoyo intermedio '{apoyo.nombre}' está en el extremo "
+                        f"(x={apoyo.posicion:.6f} m, L={self.longitud:.6f} m)"
+                    )
+        
         if n_apoyos == 1:
             resultado['advertencias'].append("⚠️ Sistema hipostático (1 apoyo). Solo se puede analizar como ménsula si hay empotramiento")
         
@@ -681,14 +710,6 @@ class Viga:
             grado = resultado['grado']
             resultado['mensajes'].append(f"✓ Sistema hiperestático de grado {grado}: {n_apoyos} apoyos")
             resultado['advertencias'].append(f"ℹ️ Se resolverá por método de compatibilidad de deflexiones")
-        
-        # Verificar separación mínima entre apoyos
-        for i in range(len(self.apoyos) - 1):
-            dist = self.apoyos[i+1].posicion - self.apoyos[i].posicion
-            if dist < 1e-3:
-                resultado['advertencias'].append(
-                    f"⚠️ Apoyos '{self.apoyos[i].nombre}' y '{self.apoyos[i+1].nombre}' muy cercanos (d={dist*1000:.2f} mm)"
-                )
         
         # Verificar que haya cargas
         if not self.cargas:
@@ -898,22 +919,38 @@ class Viga:
 
         Se separa para reutilizar tanto en el camino simbólico principal como
         en el *fallback* numérico (vectorizado) evitando recomputaciones.
+        
+        MÉTODO DE CONSTRUCCIÓN:
+        ----------------------
+        El cortante se construye usando el método de secciones desde la izquierda:
+        
+        V(x) = Σ(reacciones a la izquierda) - Σ(cargas a la izquierda)
+        
+        Las funciones Heaviside controlan cuándo cada término se activa:
+        - Reacciones: H(x - a) activa desde x ≥ a
+        - Límite de viga: [1 - H(x - L)] limita al dominio [0, L]
+        - Cargas puntuales: -P * H(x - a) resta desde x ≥ a
         """
         reacciones = self.calcular_reacciones()
 
-        # Iniciar desde 0 y sumar TODAS las reacciones con Heaviside,
-        # incluyendo el primer apoyo. Esto evita aportar reacción antes
-        # de su posición cuando el primer apoyo no está en x=0.
+        # Límite del dominio: solo en [0, L]
+        # Multiplicamos todo por una ventana [H(x) - H(x-L)] para asegurar V=0 fuera de [0,L]
+        ventana = heaviside(x) - heaviside(x - self.longitud)
+        
         V_expr = sp.Float(0.0)
 
-        # Agregar reacciones de todos los apoyos (activan con Heaviside)
+        # Agregar reacciones de todos los apoyos
+        # Usamos H(x-a, 1) para que la reacción actúe exactamente desde x=a
         for apoyo in self.apoyos:
-            V_expr += sp.Float(reacciones[apoyo.nombre]) * heaviside(x - apoyo.posicion)
+            V_expr += sp.Float(reacciones[apoyo.nombre]) * sp.Heaviside(x - apoyo.posicion, 1)
 
         # Agregar contribuciones de las cargas (signo negativo introduce saltos descendentes)
         for carga in self.cargas:
             V_expr += carga.shear_expression(x)
 
+        # Aplicar ventana para limitar al dominio [0, L]
+        V_expr = V_expr * ventana
+        
         return sp.simplify(V_expr)
 
     def _construir_expresiones(self) -> Dict[str, sp.Expr]:
@@ -1045,62 +1082,41 @@ class Viga:
         return self._construir_expresiones()
 
     def evaluar(self, num_puntos: int = 400) -> Dict[str, List[float]]:
-        """Evalúa las expresiones simbólicas (o recurre al fallback numérico).
+        """Evalúa V(x), M(x), θ(x), y(x) usando integración por sub-tramos con nudos.
 
-        Devuelve un diccionario con listas (x, V, M, theta, deflexion).
+        NUEVO MÉTODO (Oct 2025): Integración por sub-tramos que garantiza:
+        - Convención única de signos
+        - Saltos correctos en nudos
+        - No hay valores espurios fuera de [0, L]
 
         Parameters
         ----------
         num_puntos : int
-            Número de puntos de discretización uniforme en [0, L].
-            Por defecto 400 (suficiente precisión para momentos concentrados).
+            Número aproximado de puntos por tramo. El total dependerá del número de nudos.
         """
+        # Importar el módulo de integración por sub-tramos
         try:
-            expresiones = self._construir_expresiones()
-            x_vals = np.linspace(0.0, float(self.longitud), num_puntos)
-            if self._lambdas is None:
-                self._lambdas = {k: sp.lambdify(x, expr, "numpy") for k, expr in expresiones.items()}
-            resultados: Dict[str, List[float]] = {"x": [float(val) for val in x_vals]}
-            for clave, func in self._lambdas.items():
-                valores = func(x_vals)  # type: ignore[arg-type]
-                resultados[clave] = [float(v) for v in np.asarray(valores)]
+            from backend.integracion_subtramos import evaluar_por_subtramos
             
-            # ============================================================
-            # AJUSTAR M PARA GARANTIZAR M=0 EN APOYOS (RUTA SIMBÓLICA)
-            # ============================================================
-            # Aplicar la misma corrección que en el método numérico
-            # para garantizar consistencia: M(apoyos) = 0
-            if "M" in resultados:
-                M_vals = np.array(resultados["M"])
-                n_ap = len(self.apoyos)
-                
-                if n_ap >= 2:
-                    # Encontrar índices de los apoyos extremos
-                    idx_izq = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
-                    idx_der = np.argmin(np.abs(x_vals - self.apoyos[-1].posicion))
-                    
-                    # Valores actuales de momento en los extremos
-                    M_izq = M_vals[idx_izq]
-                    M_der = M_vals[idx_der]
-                    
-                    # Corrección lineal para forzar M=0 en ambos extremos
-                    x_izq = x_vals[idx_izq]
-                    x_der = x_vals[idx_der]
-                    
-                    if abs(x_der - x_izq) > 1e-12:
-                        pendiente_M = (M_der - M_izq) / (x_der - x_izq)
-                        M_vals = M_vals - (M_izq + pendiente_M * (x_vals - x_izq))
-                        resultados["M"] = [float(v) for v in M_vals]
-                elif n_ap == 1:
-                    # Un solo apoyo: ajustar para M=0 en ese apoyo
-                    idx = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
-                    M_vals = M_vals - M_vals[idx]
-                    resultados["M"] = [float(v) for v in M_vals]
+            # Usar el nuevo método
+            puntos_por_tramo = max(20, num_puntos // max(2, len(self.apoyos) + len(self.cargas)))
+            datos = evaluar_por_subtramos(self, puntos_por_tramo=puntos_por_tramo)
             
-            return resultados
+            # Convertir a listas para compatibilidad
+            return {
+                'x': datos['x'].tolist(),
+                'V': datos['V'].tolist(),
+                'M': datos['M'].tolist(),
+                'theta': datos['theta'].tolist(),
+                'deflexion': datos['deflexion'].tolist()
+            }
         except Exception as e:
             if self.debug:
-                print(f"[Viga] Advertencia: cambio a fallback numérico ({e})")
+                print(f"[Viga] Error en método de sub-tramos ({e}), usando fallback")
+                import traceback
+                traceback.print_exc()
+            
+            # Fallback al método anterior si falla
             return self._evaluar_numerico(num_puntos)
 
     def resumen_cargas(self) -> List[str]:
@@ -1160,18 +1176,21 @@ class Viga:
         # ============================================================
         # AÑADIR SALTOS POR MOMENTOS CONCENTRADOS (método numérico)
         # ============================================================
-        # Mismo principio que el método simbólico:
+        # CORRECCIÓN: Aplicar salto directo (suma M0 donde x > a)
         #   M(x) = M_base(x) + M₀·H(x-a)
         #
-        # Para x < a: H(x-a) = 0 → sin cambio
-        # Para x = a: H(x-a) = 0.5 → mitad del salto
-        # Para x > a: H(x-a) = 1 → salto completo
+        # Para x < a: no sumar nada
+        # Para x = a: sumar M₀/2 (convención Heaviside)
+        # Para x > a: sumar M₀ completo
         #
         # Resultado visual en diagrama:
         #   M₀ > 0 → Salto hacia ARRIBA
         #   M₀ < 0 → Salto hacia ABAJO
         # ============================================================
         if any(isinstance(c, CargaMomento) for c in self.cargas):
+            L = float(self.longitud)
+            tol = max(1e-12, 1e-9 * L)
+            
             for c in self.cargas:
                 if isinstance(c, CargaMomento):
                     a = float(c.posicion)
@@ -1180,32 +1199,21 @@ class Viga:
                     if esta_en_apoyo and not c.en_vano:
                         continue
                     
-                    # Función escalón de Heaviside: H(x-a)
-                    # = 0 si x < a
-                    # = 0.5 si x = a (dentro de tolerancia)
-                    # = 1 si x > a
-                    step = np.zeros_like(x_vals, dtype=float)
+                    # Salto directo: sumar M0 donde x > a (implementación correcta de Heaviside)
+                    magnitud = float(c.magnitud)
+                    M_vals[x_vals > (a + tol)] += magnitud
                     
-                    # Tolerancia relativa a L para estabilidad numérica
-                    tol = max(1e-12, 1e-9 * float(self.longitud))
-                    # Identificar regiones
-                    mask_antes = x_vals < (a - tol)  # Antes del momento
-                    mask_exacto = np.abs(x_vals - a) <= tol  # En el momento (tolerancia relativa)
-                    mask_despues = x_vals > (a + tol)  # Después del momento
-                    
-                    # Asignar valores de Heaviside
-                    step[mask_antes] = 0.0
-                    step[mask_exacto] = 0.5
-                    step[mask_despues] = 1.0
-                    
-                    # Aplicar salto con el signo del momento
-                    M_vals = M_vals + float(c.magnitud) * step
+                    # En x = a, sumar M0/2 (convención Heaviside con H(0)=1/2)
+                    idx_at_a = np.argmin(np.abs(x_vals - a))
+                    if abs(x_vals[idx_at_a] - a) < tol:
+                        M_vals[idx_at_a] += magnitud * 0.5
         
         # ============================================================
-        # AJUSTAR M(x) PARA GARANTIZAR M=0 EN APOYOS (CONDICIÓN DE BORDE)
+        # AJUSTAR M(x) PARA GARANTIZAR M=0 EN APOYOS
         # ============================================================
         # Para apoyos simples: M(x_apoyo) debe ser cero
-        # Ajustamos con interpolación lineal para forzar M=0 en extremos
+        # Ahora que aplicamos los saltos de momentos puntuales ANTES de esta corrección,
+        # es seguro aplicarla siempre (solo evitamos si el error es despreciable < 1e-9)
         n_ap = len(self.apoyos)
         if n_ap >= 2:
             # Encontrar índices de los apoyos extremos
@@ -1216,18 +1224,24 @@ class Viga:
             M_izq = M_vals[idx_izq]
             M_der = M_vals[idx_der]
             
-            # Corrección lineal para forzar M=0 en ambos extremos
-            # M_corregido(x) = M(x) - (M_izq + (M_der - M_izq)/(x_der - x_izq) * (x - x_izq))
-            x_izq = x_vals[idx_izq]
-            x_der = x_vals[idx_der]
-            
-            if abs(x_der - x_izq) > 1e-12:
-                pendiente_M = (M_der - M_izq) / (x_der - x_izq)
-                M_vals = M_vals - (M_izq + pendiente_M * (x_vals - x_izq))
+            # Aplicar corrección si hay cualquier error medible
+            if (abs(M_izq) > 1e-9 or abs(M_der) > 1e-9):
+                # Corrección lineal para forzar M=0 en ambos extremos
+                x_izq = x_vals[idx_izq]
+                x_der = x_vals[idx_der]
+                
+                if abs(x_der - x_izq) > 1e-12:
+                    pendiente_M = (M_der - M_izq) / (x_der - x_izq)
+                    M_vals = M_vals - (M_izq + pendiente_M * (x_vals - x_izq))
+                    if self.debug:
+                        print(f"[Viga] Corrección numérica aplicada: M_izq={M_izq:.2e}, M_der={M_der:.2e}")
         elif n_ap == 1:
             # Un solo apoyo: ajustar para M=0 en ese apoyo
             idx = np.argmin(np.abs(x_vals - self.apoyos[0].posicion))
-            M_vals = M_vals - M_vals[idx]
+            M_apoyo = M_vals[idx]
+            
+            if abs(M_apoyo) > 1e-9:
+                M_vals = M_vals - M_apoyo
         
         EI = self.E * self.I
         theta_vals = cumulative_trapezoid(M_vals / EI, x_vals, initial=0.0)
