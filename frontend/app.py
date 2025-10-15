@@ -881,11 +881,7 @@ with tabs[1]:
             st.pyplot(fig1)
         with gtab[1]:
             # Opciones de visualización de signos
-            col_opts_v, col_opts_m = st.columns(2)
-            with col_opts_v:
-                invert_v = st.checkbox("Invertir signo del cortante", value=False, help="Cambia la convención de signo mostrada para V(x)")
-            with col_opts_m:
-                invert_m = st.checkbox("Usar convención matemática (M positivo ↑)", value=False, help="Por defecto: convención SkyCiv (sagging positivo hacia abajo ↓). Activa esta opción para mostrar momento positivo hacia arriba.")
+            invert_v = st.checkbox("Invertir signo del cortante", value=False, help="Cambia la convención de signo mostrada para V(x)")
 
             st.caption("📊 Convención de gráficos: Momento con sagging positivo hacia abajo (estilo SkyCiv) | V' = −q(x) | M' = V")
 
@@ -897,10 +893,6 @@ with tabs[1]:
             # Aplicar inversión de signo a cortante si está activada
             if invert_v:
                 V_plot = -V_plot
-            # Si invert_m está activado, multiplicar M por -1 para compensar el invert_yaxis()
-            # Esto hace que momento positivo se dibuje hacia arriba (convención matemática)
-            if invert_m:
-                M_plot = -M_plot
 
             fig2, (axv, axm) = plt.subplots(2,1, figsize=(8,6), sharex=True)
             
@@ -935,7 +927,7 @@ with tabs[1]:
             axm.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
             # Limitar eje x al dominio de la viga
             axm.set_xlim(0.0, data['L'] / LENGTH_UNITS[disp_len])
-            # Invertir eje Y para convención SkyCiv (sagging positivo hacia abajo)
+            # Invertir eje Y SIEMPRE para convención SkyCiv (sagging positivo hacia abajo)
             axm.invert_yaxis()
             
             # Agregar apoyos en diagrama de momento
@@ -1102,7 +1094,7 @@ with tabs[2]:
                 figd, axs = plt.subplots(3,1, figsize=(6,7), sharex=True)
                 axs[0].plot(xs/LENGTH_UNITS[u_len], (resultados["V_total"]-resultados["V_suma"]) / FORCE_UNITS[u_force])
                 axs[1].plot(xs/LENGTH_UNITS[u_len], (resultados["M_total"]-resultados["M_suma"]) / (FORCE_UNITS[u_force]*LENGTH_UNITS[u_len]))
-                # Invertir eje Y del momento para convención SkyCiv (sagging positivo hacia abajo)
+                # Invertir eje Y del momento SIEMPRE para convención SkyCiv (sagging positivo hacia abajo)
                 axs[1].invert_yaxis()
                 axs[2].plot(xs/LENGTH_UNITS[u_len], (resultados["y_total"]-resultados["y_suma"]) / DEFLEXION_DISPLAY[u_defl_disp])
                 for ax, lab in zip(axs, [f"ΔV [{u_force}]", f"ΔM [{u_force}·{u_len}]", f"Δy [{u_defl_disp}]"]):
