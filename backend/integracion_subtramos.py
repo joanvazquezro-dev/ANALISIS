@@ -293,24 +293,23 @@ def evaluar_por_subtramos(viga: Viga, puntos_por_tramo: int = 50) -> Dict[str, n
     # ═══════════════════════════════════════════════════════════════════════════
     # V(x) = Σ(R_i·H(x-a_i)) - Σ(P_j·H(x-b_j)) - ∫₀ˣ w_total(ξ) dξ
     #
-    # MEJORA: Usamos H(0)=½ para precisión numérica óptima en nudos.
-    # Esto reduce residuos en M(x) exactamente en las discontinuidades,
-    # aunque la corrección afín por vano (PASO 7) los eliminaría de todas formas.
+    # Usamos H(0)=1 (comportamiento estándar) para que los saltos de V sean
+    # claramente visibles en la tabla de resultados desde el primer punto.
     
     V_vals = np.zeros(n_puntos, dtype=float)
     
     # Saltos por REACCIONES (hacia arriba → positivo)
-    # Usar H(0)=½ para simetría exacta en el nudo del apoyo
+    # Usar H(0)=1 para que V(apoyo) = R_A directamente (mejor para visualización)
     for apoyo in viga.apoyos:
         R_y = float(reacciones[apoyo.nombre])
-        V_vals += R_y * H(x_grid - apoyo.posicion, half=True)
+        V_vals += R_y * H(x_grid - apoyo.posicion, half=False)
     
     # Saltos por CARGAS PUNTUALES (hacia abajo → negativo)
-    # Usar H(0)=½ para simetría exacta en el nudo de la carga
+    # Usar H(0)=1 para que el salto se vea claramente en la tabla
     for carga in viga.cargas:
         if isinstance(carga, CargaPuntual):
             P = float(carga.magnitud)
-            V_vals -= P * H(x_grid - carga.posicion, half=True)
+            V_vals -= P * H(x_grid - carga.posicion, half=False)
     
     # Integral de w_total (UNA SOLA VEZ)
     integral_w = cumulative_trapezoid(w_vals, x_grid, initial=0.0)
