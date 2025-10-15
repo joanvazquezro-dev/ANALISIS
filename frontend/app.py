@@ -107,6 +107,14 @@ CUSTOM_CSS = """
         font-weight: 600;
     }
     
+    /* Tarjetas de consulta - modo claro */
+    div[data-testid="column"] > div > div {
+        transition: transform 0.2s ease;
+    }
+    div[data-testid="column"] > div > div:hover {
+        transform: translateY(-2px);
+    }
+    
     /* Modo oscuro */
     @media (prefers-color-scheme: dark) {
         .load-box {
@@ -124,6 +132,19 @@ CUSTOM_CSS = """
         .stDataFrame thead tr th {
             color: #ffffff;
         }
+        
+        /* Ajustar tarjetas de consulta para modo oscuro */
+        div[style*='background-color: rgba'] {
+            filter: brightness(0.9);
+        }
+    }
+    
+    /* Animación suave para expandables */
+    .streamlit-expanderHeader {
+        transition: background-color 0.2s ease;
+    }
+    .streamlit-expanderHeader:hover {
+        background-color: rgba(151, 166, 195, 0.15) !important;
     }
 </style>
 """
@@ -846,6 +867,160 @@ with tabs[1]:
             xdef, ydef = maximos["deflexion"]
             cols_reacciones[-1].metric("|y|max", f"{ydef/DEFLEXION_DISPLAY[disp_defl]:.3e} {disp_defl}")
 
+        # ============================================================
+        # SECCIÓN: CONSULTA DE VALORES EN POSICIÓN ESPECÍFICA
+        # ============================================================
+        st.markdown("### 🔍 Consultar valores en posición específica")
+        
+        with st.container():
+            # Usar un expander para mantener limpia la interfaz
+            with st.expander("📍 Consultar valores en una posición x", expanded=False):
+                st.markdown("Ingresa cualquier posición a lo largo de la viga para obtener los valores interpolados de V, M, θ y y.")
+                
+                # Columnas para input y presets
+                col_input, col_presets = st.columns([3, 2])
+                
+                with col_input:
+                    x_consulta = st.number_input(
+                        f"**Posición x** ({disp_len})",
+                        min_value=0.0,
+                        max_value=float(data['L'] / LENGTH_UNITS[disp_len]),
+                        value=float(data['L'] / LENGTH_UNITS[disp_len]) / 2,
+                        step=0.01,
+                        format="%.3f",
+                        key='x_consulta',
+                        help="Posición donde deseas consultar los valores"
+                    )
+                
+                with col_presets:
+                    st.markdown("**Posiciones rápidas:**")
+                    preset_cols = st.columns(3)
+                    L_display = float(data['L'] / LENGTH_UNITS[disp_len])
+                    
+                    if preset_cols[0].button("0", key="preset_0", use_container_width=True):
+                        st.session_state.x_consulta = 0.0
+                        st.experimental_rerun()
+                    if preset_cols[1].button("L/2", key="preset_mid", use_container_width=True):
+                        st.session_state.x_consulta = L_display / 2
+                        st.experimental_rerun()
+                    if preset_cols[2].button("L", key="preset_L", use_container_width=True):
+                        st.session_state.x_consulta = L_display
+                        st.experimental_rerun()
+                
+                # Botón de consulta prominente
+                if st.button("🎯 Calcular valores en esta posición", type="primary", use_container_width=True):
+                    st.session_state.show_query_results = True
+                
+                # Mostrar resultados si se ha consultado
+                if st.session_state.get('show_query_results', False):
+                    # Convertir x_consulta a SI
+                    x_consulta_si = x_consulta * LENGTH_UNITS[disp_len]
+                    
+                    # Validar rango
+                    if x_consulta_si < df['x'].min() or x_consulta_si > df['x'].max():
+                        st.error(f"⚠️ La posición debe estar entre 0 y {data['L'] / LENGTH_UNITS[disp_len]:.3f} {disp_len}")
+                    else:
+                        # Interpolación para obtener valores exactos
+                        V_interp = float(np.interp(x_consulta_si, df['x'], df['cortante']))
+                        M_interp = float(np.interp(x_consulta_si, df['x'], df['momento']))
+                        theta_interp = float(np.interp(x_consulta_si, df['x'], df['pendiente']))
+                        y_interp = float(np.interp(x_consulta_si, df['x'], df['deflexion']))
+                        
+                        # Convertir a unidades de visualización
+                        V_display = V_interp / FORCE_UNITS[disp_force]
+                        M_display = M_interp / (FORCE_UNITS[disp_force] * LENGTH_UNITS[disp_len])
+                        y_display = y_interp / DEFLEXION_DISPLAY[disp_defl]
+                        theta_display = theta_interp  # En radianes
+                        theta_degrees = np.degrees(theta_interp)
+                        
+                        # Separador visual
+                        st.markdown("---")
+                        st.markdown(f"#### 📊 Resultados en **x = {x_consulta:.4f}** {disp_len}")
+                        
+                        # Mostrar resultados en tarjetas con mejor formato
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        with col1:
+                            st.markdown("""
+                            <div style='background-color: rgba(255, 127, 14, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #ff7f0e;'>
+                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Cortante</p>
+                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4f}</p>
+                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>{}</p>
+                            </div>
+                            """.format(V_display, disp_force), unsafe_allow_html=True)
+                        
+                        with col2:
+                            st.markdown("""
+                            <div style='background-color: rgba(44, 160, 44, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #2ca02c;'>
+                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Momento</p>
+                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4f}</p>
+                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>{}·{}</p>
+                            </div>
+                            """.format(M_display, disp_force, disp_len), unsafe_allow_html=True)
+                        
+                        with col3:
+                            st.markdown("""
+                            <div style='background-color: rgba(148, 103, 189, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #9467bd;'>
+                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Pendiente</p>
+                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4f}</p>
+                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>rad ({:.4f}°)</p>
+                            </div>
+                            """.format(theta_display, theta_degrees), unsafe_allow_html=True)
+                        
+                        with col4:
+                            st.markdown("""
+                            <div style='background-color: rgba(214, 39, 40, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #d62728;'>
+                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Deflexión</p>
+                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4e}</p>
+                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>{}</p>
+                            </div>
+                            """.format(y_display, disp_defl), unsafe_allow_html=True)
+                        
+                        # Tabla resumen con valores completos
+                        st.markdown("##### 📋 Tabla resumen")
+                        results_table = pd.DataFrame({
+                            'Magnitud': ['Posición', 'Cortante V', 'Momento M', 'Pendiente θ', 'Deflexión y'],
+                            'Valor': [
+                                f"{x_consulta:.6f}",
+                                f"{V_display:.6e}",
+                                f"{M_display:.6e}",
+                                f"{theta_display:.6e} rad",
+                                f"{y_display:.6e}"
+                            ],
+                            'Unidades': [
+                                disp_len,
+                                disp_force,
+                                f"{disp_force}·{disp_len}",
+                                f"rad ({theta_degrees:.6e}°)",
+                                disp_defl
+                            ],
+                            'Valor SI': [
+                                f"{x_consulta_si:.6f} m",
+                                f"{V_interp:.6e} N",
+                                f"{M_interp:.6e} N·m",
+                                f"{theta_interp:.6e} rad",
+                                f"{y_interp:.6e} m"
+                            ]
+                        })
+                        st.dataframe(results_table, use_container_width=True, hide_index=True)
+                        
+                        # Botón para copiar resultados
+                        results_text = f"""Resultados en x = {x_consulta:.4f} {disp_len}:
+Cortante V = {V_display:.6e} {disp_force}
+Momento M = {M_display:.6e} {disp_force}·{disp_len}
+Pendiente θ = {theta_display:.6e} rad ({theta_degrees:.6e}°)
+Deflexión y = {y_display:.6e} {disp_defl}"""
+                        
+                        st.download_button(
+                            label="📋 Copiar resultados (TXT)",
+                            data=results_text,
+                            file_name=f"resultados_x_{x_consulta:.3f}.txt",
+                            mime="text/plain",
+                            use_container_width=False
+                        )
+        
+        st.markdown("---")
+        
         st.markdown("### Tabla (primeras filas)")
         # Renombrar columnas con unidades mostradas
         rename_cols = {}
