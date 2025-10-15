@@ -93,18 +93,81 @@ IS_DARK = (_theme_base == "dark")
 CUSTOM_CSS = """
 <style>
     .load-box {
-        padding: 0.4rem 0.6rem;
-        background: #fafafa;
-        border: 1px solid #e3e3e3;
-        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        background: #edf2f7;
+        border: 1px solid #cbd5e0;
+        border-radius: 8px;
+        transition: all 0.2s ease;
+    }
+    .load-box:hover {
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-color: #1f4788;
     }
     .stMetric {
-        background: #f5f7fa;
-        border-radius: 8px;
-        padding: 0.25rem 0.5rem;
+        background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+        border-radius: 10px;
+        padding: 0.5rem 0.75rem;
+        border: 1px solid #e2e8f0;
     }
     button[kind="primary"] {
         font-weight: 600;
+        background: linear-gradient(135deg, #1f4788 0%, #2e5a9e 100%) !important;
+        border: none !important;
+        box-shadow: 0 2px 4px rgba(31, 71, 136, 0.2);
+        transition: all 0.2s ease;
+    }
+    button[kind="primary"]:hover {
+        box-shadow: 0 4px 8px rgba(31, 71, 136, 0.3);
+        transform: translateY(-1px);
+    }
+    
+    /* Mejorar expandibles */
+    .streamlit-expanderHeader {
+        background-color: #edf2f7 !important;
+        border: 1px solid #cbd5e0 !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s ease;
+    }
+    .streamlit-expanderHeader:hover {
+        background-color: #e2e8f0 !important;
+        border-color: #1f4788 !important;
+    }
+    
+    /* Mejorar tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 0.5rem 1.5rem;
+        border-radius: 8px 8px 0 0;
+        font-weight: 500;
+        background-color: #edf2f7;
+        border: 1px solid #cbd5e0;
+        border-bottom: none;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: white;
+        border-color: #1f4788;
+        border-bottom: 2px solid white;
+        color: #1f4788;
+        font-weight: 600;
+    }
+    
+    /* Mejorar tablas */
+    .stDataFrame {
+        border: 1px solid #cbd5e0;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .stDataFrame thead tr th {
+        background-color: #1f4788 !important;
+        color: white !important;
+        font-weight: 600 !important;
+        border-bottom: 2px solid #2e5a9e !important;
+    }
+    .stDataFrame tbody tr:hover {
+        background-color: rgba(31, 71, 136, 0.05);
     }
     
     /* Tarjetas de consulta - modo claro */
@@ -118,13 +181,38 @@ CUSTOM_CSS = """
     /* Modo oscuro */
     @media (prefers-color-scheme: dark) {
         .load-box {
-            background: #1e1f26;
-            border: 1px solid #3a3d46;
-            color: #e6e6e6;
+            background: #1a202c;
+            border: 1px solid #4a5568;
+            color: #e2e8f0;
+        }
+        .load-box:hover {
+            border-color: #5a8fd6;
         }
         .stMetric {
-            background: #242730;
-            color: #e6e6e6;
+            background: linear-gradient(135deg, #2d3748 0%, #1a202c 100%);
+            color: #e2e8f0;
+            border: 1px solid #4a5568;
+        }
+        .streamlit-expanderHeader {
+            background-color: #2d3748 !important;
+            border-color: #4a5568 !important;
+            color: #e2e8f0 !important;
+        }
+        .streamlit-expanderHeader:hover {
+            border-color: #5a8fd6 !important;
+        }
+        .stTabs [data-baseweb="tab"] {
+            background-color: #2d3748;
+            border-color: #4a5568;
+            color: #a0aec0;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: #1a202c;
+            border-color: #5a8fd6;
+            color: #5a8fd6;
+        }
+        .stDataFrame thead tr th {
+            background-color: #5a8fd6 !important;
         }
         .stDataFrame tbody tr td {
             color: #e0e0e0;
@@ -132,8 +220,6 @@ CUSTOM_CSS = """
         .stDataFrame thead tr th {
             color: #ffffff;
         }
-        
-        /* Ajustar tarjetas de consulta para modo oscuro */
         div[style*='background-color: rgba'] {
             filter: brightness(0.9);
         }
@@ -982,49 +1068,57 @@ with tabs[1]:
                         
                         # Separador visual
                         st.markdown("---")
-                        st.markdown(f"#### 📊 Resultados en **x = {x_consulta:.4f}** {disp_len}")
+                        st.markdown(f"""
+                        <div style='background: linear-gradient(135deg, #1f4788 0%, #2e5a9e 100%); padding: 1rem 1.5rem; border-radius: 8px; margin-bottom: 1.5rem;'>
+                            <h4 style='color: white; margin: 0; font-weight: 600;'>📊 Análisis en x = {x_consulta:.4f} {disp_len}</h4>
+                        </div>
+                        """, unsafe_allow_html=True)
                         
                         # Mostrar resultados en tarjetas con mejor formato
                         col1, col2, col3, col4 = st.columns(4)
                         
                         with col1:
                             st.markdown("""
-                            <div style='background-color: rgba(255, 127, 14, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #ff7f0e;'>
-                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Cortante</p>
-                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4f}</p>
-                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>{}</p>
+                            <div style='background: linear-gradient(135deg, #e8f1ff 0%, #d6e5f7 100%); padding: 1.25rem; border-radius: 8px; border: 2px solid #2e5a9e; box-shadow: 0 2px 8px rgba(46, 90, 158, 0.15); transition: all 0.3s ease;'>
+                                <p style='font-size: 0.75rem; margin: 0; color: #1f4788; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;'>Cortante</p>
+                                <p style='font-size: 2rem; margin: 0.5rem 0 0.25rem 0; font-weight: 800; color: #1e293b;'>{:.4f}</p>
+                                <p style='font-size: 0.85rem; margin: 0; color: #475569; font-weight: 600;'>{}</p>
                             </div>
                             """.format(V_display, disp_force), unsafe_allow_html=True)
                         
                         with col2:
                             st.markdown("""
-                            <div style='background-color: rgba(44, 160, 44, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #2ca02c;'>
-                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Momento</p>
-                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4f}</p>
-                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>{}·{}</p>
+                            <div style='background: linear-gradient(135deg, #e8f5e9 0%, #d4edd6 100%); padding: 1.25rem; border-radius: 8px; border: 2px solid #2d6f3d; box-shadow: 0 2px 8px rgba(45, 111, 61, 0.15); transition: all 0.3s ease;'>
+                                <p style='font-size: 0.75rem; margin: 0; color: #1b5e20; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;'>Momento</p>
+                                <p style='font-size: 2rem; margin: 0.5rem 0 0.25rem 0; font-weight: 800; color: #1e293b;'>{:.4f}</p>
+                                <p style='font-size: 0.85rem; margin: 0; color: #475569; font-weight: 600;'>{}·{}</p>
                             </div>
                             """.format(M_display, disp_force, disp_len), unsafe_allow_html=True)
                         
                         with col3:
                             st.markdown("""
-                            <div style='background-color: rgba(148, 103, 189, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #9467bd;'>
-                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Pendiente</p>
-                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4f}</p>
-                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>rad ({:.4f}°)</p>
+                            <div style='background: linear-gradient(135deg, #f3e8ff 0%, #e9d5f5 100%); padding: 1.25rem; border-radius: 8px; border: 2px solid #5a3d7a; box-shadow: 0 2px 8px rgba(90, 61, 122, 0.15); transition: all 0.3s ease;'>
+                                <p style='font-size: 0.75rem; margin: 0; color: #4a148c; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;'>Pendiente</p>
+                                <p style='font-size: 2rem; margin: 0.5rem 0 0.25rem 0; font-weight: 800; color: #1e293b;'>{:.4f}</p>
+                                <p style='font-size: 0.85rem; margin: 0; color: #475569; font-weight: 600;'>rad ({:.4f}°)</p>
                             </div>
                             """.format(theta_display, theta_degrees), unsafe_allow_html=True)
                         
                         with col4:
                             st.markdown("""
-                            <div style='background-color: rgba(214, 39, 40, 0.1); padding: 1rem; border-radius: 0.5rem; border-left: 4px solid #d62728;'>
-                                <p style='font-size: 0.85rem; margin: 0; color: #666;'>Deflexión</p>
-                                <p style='font-size: 1.5rem; margin: 0.25rem 0; font-weight: bold;'>{:.4e}</p>
-                                <p style='font-size: 0.75rem; margin: 0; color: #888;'>{}</p>
+                            <div style='background: linear-gradient(135deg, #fff3e0 0%, #ffe8cc 100%); padding: 1.25rem; border-radius: 8px; border: 2px solid #b85c00; box-shadow: 0 2px 8px rgba(184, 92, 0, 0.15); transition: all 0.3s ease;'>
+                                <p style='font-size: 0.75rem; margin: 0; color: #e65100; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700;'>Deflexión</p>
+                                <p style='font-size: 2rem; margin: 0.5rem 0 0.25rem 0; font-weight: 800; color: #1e293b;'>{:.4e}</p>
+                                <p style='font-size: 0.85rem; margin: 0; color: #475569; font-weight: 600;'>{}</p>
                             </div>
                             """.format(y_display, disp_defl), unsafe_allow_html=True)
                         
                         # Tabla resumen con valores completos
-                        st.markdown("##### 📋 Tabla resumen")
+                        st.markdown("""
+                        <div style='background: #f8fafc; padding: 0.75rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #1f4788; margin-top: 1.5rem;'>
+                            <h5 style='margin: 0; color: #1e293b; font-weight: 600;'>📋 Tabla Resumen Detallada</h5>
+                        </div>
+                        """, unsafe_allow_html=True)
                         results_table = pd.DataFrame({
                             'Magnitud': ['Posición', 'Cortante V', 'Momento M', 'Pendiente θ', 'Deflexión y'],
                             'Valor': [
