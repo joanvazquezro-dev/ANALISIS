@@ -874,51 +874,98 @@ with tabs[1]:
         
         with st.container():
             # Usar un expander para mantener limpia la interfaz
-            with st.expander("📍 Consultar valores en una posición x", expanded=False):
-                st.markdown("Ingresa cualquier posición a lo largo de la viga para obtener los valores interpolados de V, M, θ y y.")
+            with st.expander("📍 Haz clic para consultar valores en cualquier posición", expanded=False):
+                st.markdown("**Selecciona una posición** usando los botones rápidos o ingresa un valor personalizado.")
                 
-                # Columnas para input y presets
-                col_input, col_presets = st.columns([3, 2])
+                L_display = float(data['L'] / LENGTH_UNITS[disp_len])
                 
-                with col_input:
-                    x_consulta = st.number_input(
-                        f"**Posición x** ({disp_len})",
-                        min_value=0.0,
-                        max_value=float(data['L'] / LENGTH_UNITS[disp_len]),
-                        value=float(data['L'] / LENGTH_UNITS[disp_len]) / 2,
-                        step=0.01,
-                        format="%.3f",
-                        key='x_consulta',
-                        help="Posición donde deseas consultar los valores"
-                    )
+                # Tabs para diferentes métodos de selección
+                tab_presets, tab_custom = st.tabs(["⚡ Posiciones rápidas", "✏️ Posición personalizada"])
                 
-                with col_presets:
-                    st.markdown("**Posiciones rápidas:**")
-                    preset_cols = st.columns(3)
-                    L_display = float(data['L'] / LENGTH_UNITS[disp_len])
+                x_consulta = None
+                calcular = False
+                
+                with tab_presets:
+                    st.markdown("Consulta valores en posiciones comunes de la viga:")
                     
-                    if preset_cols[0].button("0", key="preset_0", use_container_width=True):
-                        st.session_state.x_consulta = 0.0
-                        st.experimental_rerun()
-                    if preset_cols[1].button("L/2", key="preset_mid", use_container_width=True):
-                        st.session_state.x_consulta = L_display / 2
-                        st.experimental_rerun()
-                    if preset_cols[2].button("L", key="preset_L", use_container_width=True):
-                        st.session_state.x_consulta = L_display
-                        st.experimental_rerun()
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("Inicio", f"0.000 {disp_len}")
+                        if st.button("� Ver valores en x=0", key="calc_0", use_container_width=True, type="primary"):
+                            x_consulta = 0.0
+                            calcular = True
+                    
+                    with col2:
+                        st.metric("Centro", f"{L_display/2:.3f} {disp_len}")
+                        if st.button("📊 Ver valores en x=L/2", key="calc_mid", use_container_width=True, type="primary"):
+                            x_consulta = L_display / 2
+                            calcular = True
+                    
+                    with col3:
+                        st.metric("Final", f"{L_display:.3f} {disp_len}")
+                        if st.button("� Ver valores en x=L", key="calc_L", use_container_width=True, type="primary"):
+                            x_consulta = L_display
+                            calcular = True
+                    
+                    # Agregar más posiciones útiles
+                    st.markdown("---")
+                    st.markdown("**Otras posiciones útiles:**")
+                    col4, col5, col6, col7 = st.columns(4)
+                    
+                    with col4:
+                        if st.button(f"x=L/4 ({L_display/4:.3f})", key="calc_q1", use_container_width=True):
+                            x_consulta = L_display / 4
+                            calcular = True
+                    
+                    with col5:
+                        if st.button(f"x=L/3 ({L_display/3:.3f})", key="calc_t1", use_container_width=True):
+                            x_consulta = L_display / 3
+                            calcular = True
+                    
+                    with col6:
+                        if st.button(f"x=2L/3 ({2*L_display/3:.3f})", key="calc_t2", use_container_width=True):
+                            x_consulta = 2 * L_display / 3
+                            calcular = True
+                    
+                    with col7:
+                        if st.button(f"x=3L/4 ({3*L_display/4:.3f})", key="calc_q3", use_container_width=True):
+                            x_consulta = 3 * L_display / 4
+                            calcular = True
                 
-                # Botón de consulta prominente
-                if st.button("🎯 Calcular valores en esta posición", type="primary", use_container_width=True):
-                    st.session_state.show_query_results = True
+                with tab_custom:
+                    st.markdown("Ingresa cualquier posición entre 0 y L:")
+                    
+                    col_inp, col_btn = st.columns([3, 1])
+                    
+                    with col_inp:
+                        x_manual = st.number_input(
+                            f"Posición x ({disp_len})",
+                            min_value=0.0,
+                            max_value=L_display,
+                            value=L_display / 2,
+                            step=0.01,
+                            format="%.4f",
+                            key='x_manual_input',
+                            help=f"Valor entre 0 y {L_display:.3f}"
+                        )
+                    
+                    with col_btn:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        if st.button("🎯 Consultar", type="primary", use_container_width=True, key="calc_custom"):
+                            x_consulta = x_manual
+                            calcular = True
                 
-                # Mostrar resultados si se ha consultado
-                if st.session_state.get('show_query_results', False):
+                # ============================================================
+                # MOSTRAR RESULTADOS (si se presionó algún botón)
+                # ============================================================
+                if calcular and x_consulta is not None:
                     # Convertir x_consulta a SI
                     x_consulta_si = x_consulta * LENGTH_UNITS[disp_len]
                     
                     # Validar rango
                     if x_consulta_si < df['x'].min() or x_consulta_si > df['x'].max():
-                        st.error(f"⚠️ La posición debe estar entre 0 y {data['L'] / LENGTH_UNITS[disp_len]:.3f} {disp_len}")
+                        st.error(f"⚠️ La posición debe estar entre 0 y {L_display:.3f} {disp_len}")
                     else:
                         # Interpolación para obtener valores exactos
                         V_interp = float(np.interp(x_consulta_si, df['x'], df['cortante']))
